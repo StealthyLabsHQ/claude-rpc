@@ -1,0 +1,10 @@
+Version: 1.0.0.0
+CompanyName: StealthyLabs
+FileDescription: Claude RPC
+InternalName: claude-rpc
+LegalCopyright: Copyright (c) 2026 StealthyLabs
+OriginalFilename: claude-rpc.exe
+ProductName: Claude RPC
+Translation:
+  - langID: 0
+    charsetID: 1200

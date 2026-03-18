@@ -1,0 +1,10 @@
+.env
+.env.encrypted
+__pycache__/
+*.pyc
+dist/
+build/
+runtime/
+*.spec
+node_modules/
+*.exe
