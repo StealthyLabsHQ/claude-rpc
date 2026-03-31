@@ -534,6 +534,7 @@ function formatModelName(modelId) {
 
   const latestVersions = { opus: '4.6', sonnet: '4.6', haiku: '4.5' };
 
+  if (id.includes('opusplan')) return 'Opus Plan / Sonnet 4.6';
   if (id.includes('opus')) return `Claude Opus ${version || latestVersions.opus}${ctx}`.trim();
   if (id.includes('sonnet')) return `Claude Sonnet ${version || latestVersions.sonnet}${ctx}`.trim();
   if (id.includes('haiku')) return `Claude Haiku ${version || latestVersions.haiku}${ctx}`.trim();
