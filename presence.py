@@ -232,6 +232,8 @@ def format_model_name(model_id):
             ctx = ' (1M)'
 
     latest = {'opus': '4.6', 'sonnet': '4.6', 'haiku': '4.5'}
+    if 'opusplan' in mid:
+        return 'Opus Plan / Sonnet 4.6'
     if 'opus' in mid:
         return f'Opus {version or latest["opus"]}{ctx}'.strip()
     if 'sonnet' in mid:
