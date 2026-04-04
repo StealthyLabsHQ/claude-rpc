@@ -1,0 +1,58 @@
+# Changelog
+
+## v2.2.0 (2026-04-04)
+
+### Added
+- **Config file** (`~/.claude-rpc/config.json`) for persistent preferences (idle timeout, DND, logo mode, webhook, verbose)
+- **CLI flags**: `--version`, `--help`, `--verbose`, `--dnd`, `--no-idle`
+- **Do Not Disturb mode** via config or `--dnd` flag - hides Discord presence
+- **File-based logging** at `~/.claude-rpc/rpc.log` with automatic 1 MB rotation
+- **Linux support** in watcher script (Claude Code detection via pgrep)
+- **Multi-instance display** - shows instance count when multiple Claude Code sessions are running
+- **Discord webhook notifications** (optional) on session start/end/away events
+- **System tray for Node.js** (`tray.js`) - Windows NotifyIcon with DND toggle, Start on Boot, Quit
+- **Automated CI/CD** - GitHub Actions for testing (Node 18/20/22) and release builds
+- **Test suite** - 20 tests covering formatModelName, compareVersions, sanitizeString, config
+- **Status file** (`~/.claude-rpc/status.txt`) for tray communication
+
+### Fixed
+- **LOGO_URL** pointed to old repo name `anthropic-rich-presence` instead of `claude-rpc`
+- **findLatestJsonlFile()** now scans recursively (depth-limited to 3, excludes node_modules/.git/.venv)
+- **Provider cache** now expires after 5 minutes instead of being permanent
+- **DND mode** was referencing `global.dndMode` which was never set (dead code)
+- **Idle timeout** now configurable via config file (was hardcoded to env var only)
+- **.env loading** now checks `__dirname` first, fixing "DISCORD_CLIENT_ID missing" errors
+- **Duplicate `atexit` import** in main.py
+- **Build script** now installs production-only dependencies (`--omit=dev`), saving ~50 MB
+
+### Removed
+- `presence.py` (737 lines) - legacy RPC logic fully replaced by index.js
+- `discord_ipc.py` (152 lines) - replaced by @xhayper/discord-rpc
+- `secure_env.py` (77 lines) - replaced by secure-env.js
+- `anthropic-rich-presence.spec` - legacy PyInstaller spec
+
+### Changed
+- `index.js` refactored to export `start()` function (importable by tray.js without side effects)
+- `package.json` updated: main points to index.js, added vitest, keywords, engines, files field
+- `.gitignore` cleaned up: added .venv, *.log, IDE dirs
+- Watcher script bumped to v11 with Linux support
+- Release workflow now builds `claude-rpc.exe` via PyInstaller + bundles Node.js runtime
+
+## v2.1.0 (2026-03-31)
+
+### Added
+- Display "Opus Plan / Sonnet 4.6" in Discord RPC for Opus Plan Mode
+
+## v2.0.0 (2026-03-20)
+
+### Added
+- Initial release
+- Auto-detect Claude Code and Claude Desktop
+- Live model tracking (Opus, Sonnet, Haiku)
+- Extended thinking detection
+- 1M context badge for supported models
+- Session elapsed time from JSONL timestamps
+- Idle timeout (15 minutes)
+- Windows system tray with Start on Boot
+- Zero-config Discord Application ID
+- DPAPI/Keychain credential encryption
