@@ -30,8 +30,9 @@ console.log = () => {};
 const { loadSecureEnv } = require('./secure-env');
 const loadedSecure = loadSecureEnv();
 if (!loadedSecure) {
-  dotenv.config({ path: require('path').join(require('path').dirname(process.execPath), '.env') });
-  dotenv.config();
+  dotenv.config({ path: require('path').join(__dirname, '.env') }); // same dir as index.js
+  dotenv.config({ path: require('path').join(require('path').dirname(process.execPath), '.env') }); // exe dir (pkg builds)
+  dotenv.config(); // cwd fallback
 }
 console.log = originalLog;
 
