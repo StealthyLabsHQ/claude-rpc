@@ -4,7 +4,7 @@
 <h1 align="center">Claude RPC</h1>
 
 <p align="center">
-  Discord Rich Presence for Claude AI — displays real-time activity status on your Discord profile.
+  Discord Rich Presence for Claude AI - displays real-time activity status on your Discord profile.
 </p>
 
 ---
@@ -29,15 +29,15 @@
 
 ## Installation
 
-### Option 1 — Standalone exe (recommended)
+### Option 1 - Standalone exe (recommended)
 
 1. Download `claude-rpc-windows-x64.zip` from the [latest release](https://github.com/StealthyLabsHQ/claude-rpc/releases/latest)
 2. Extract the folder
 3. Double-click **`claude-rpc.exe`**
 
-No install needed — Node.js is bundled inside.
+No install needed - Node.js is bundled inside.
 
-### Option 2 — From source
+### Option 2 - From source
 
 Requires [Node.js](https://nodejs.org/) 18+.
 
@@ -92,7 +92,7 @@ Claude RPC uses a config file at `~/.claude-rpc/config.json`. Create it to custo
 |-----|------|---------|-------------|
 | `idleTimeoutMinutes` | number | `15` | Minutes before showing Away (0 = disabled) |
 | `logoMode` | string | `"url"` | Logo source: `"url"` (GitHub) or `"asset"` (Discord app) |
-| `dnd` | boolean | `false` | Do Not Disturb — hides presence |
+| `dnd` | boolean | `false` | Do Not Disturb - hides presence |
 | `verbose` | boolean | `false` | Verbose console logging |
 | `webhookUrl` | string | `null` | Discord webhook URL for session notifications |
 

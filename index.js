@@ -22,7 +22,7 @@ Options:
   process.exit(0);
 }
 
-// --- Environment loading (silent — suppress discord-rpc handshake noise) ---
+// --- Environment loading (silent - suppress discord-rpc handshake noise) ---
 
 const dotenv = require('dotenv');
 const originalLog = console.log;
@@ -149,7 +149,7 @@ function acquireLock() {
         console.error(`Another instance is already running (PID ${pid}). Exiting.`);
         process.exit(0);
       } catch {
-        // Stale lock — overwrite
+        // Stale lock - overwrite
       }
     }
   } catch {}
@@ -848,7 +848,7 @@ done
       const payload = JSON.stringify({
         content: null,
         embeds: [{
-          title: `Claude RPC \u2014 ${event}`,
+          title: `Claude RPC - ${event}`,
           description: sanitizeString(details || '', 256),
           color: event === 'Session Started' ? 0x6C63FF : event === 'Away' ? 0xFFAA00 : 0x999999,
           timestamp: new Date().toISOString(),
@@ -900,7 +900,7 @@ done
     const d = delay ?? Math.min(5000 * Math.pow(1.5, reconnectAttempts), MAX_RECONNECT_DELAY);
     reconnectAttempts++;
     log('info', `Discord disconnected, reconnecting in ${Math.round(d / 1000)}s`);
-    console.log(`\nDiscord disconnected \u2014 reconnecting in ${Math.round(d / 1000)}s...`);
+    console.log(`\nDiscord disconnected - reconnecting in ${Math.round(d / 1000)}s...`);
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       client = new Client({ clientId: CLIENT_ID });
