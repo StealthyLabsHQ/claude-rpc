@@ -21,24 +21,26 @@ jobs:
       - run: npm ci
 
       - name: Install production deps for runtime
+        shell: pwsh
         run: |
-          mkdir dist\runtime
-          copy index.js dist\runtime\
-          copy tray.js dist\runtime\
-          copy secure-env.js dist\runtime\
-          copy package.json dist\runtime\
-          if exist .env copy .env dist\runtime\
-          cd dist\runtime
+          New-Item -ItemType Directory -Force -Path dist\runtime | Out-Null
+          Copy-Item index.js dist\runtime\
+          Copy-Item tray.js dist\runtime\
+          Copy-Item secure-env.js dist\runtime\
+          Copy-Item package.json dist\runtime\
+          if (Test-Path .env) { Copy-Item .env dist\runtime\ }
+          Set-Location dist\runtime
           npm install --omit=dev --ignore-scripts --no-fund --no-audit
 
       - name: Bundle node.exe
-        run: copy "$env:ProgramFiles\nodejs\node.exe" dist\runtime\node.exe
         shell: pwsh
+        run: Copy-Item "$env:ProgramFiles\nodejs\node.exe" dist\runtime\node.exe
 
       - name: Copy logo
+        shell: pwsh
         run: |
-          mkdir dist\logo
-          copy logo\* dist\logo\
+          New-Item -ItemType Directory -Force -Path dist\logo | Out-Null
+          Copy-Item logo\* dist\logo\
 
       - name: Create archive
         run: Compress-Archive -Path dist\* -DestinationPath claude-rpc-windows-x64.zip
