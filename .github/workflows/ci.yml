@@ -30,4 +30,4 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: node -e "require('./index')" # syntax check
+      - run: node --check index.js && node --check tray.js && node --check secure-env.js
