@@ -1,11 +1,11 @@
 """Claude RPC — Tray wrapper that launches Node.js RPC from runtime/."""
 
-import atexit
 import os
 import signal
 import subprocess
 import sys
 import threading
+import atexit
 from pathlib import Path
 
 # --- Single instance (Named Mutex on Windows, lock file on Unix) ---
@@ -37,7 +37,6 @@ def acquire_single_instance():
                 pass
         with open(lock_file, 'w') as f:
             f.write(str(os.getpid()))
-        import atexit
         atexit.register(lambda: os.unlink(lock_file) if os.path.exists(lock_file) else None)
 
 

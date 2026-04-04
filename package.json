@@ -1,17 +1,24 @@
 {
   "name": "claude-rpc",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Discord Rich Presence for Claude AI",
-  "main": "tray.js",
+  "main": "index.js",
+  "bin": "tray.js",
   "scripts": {
     "start": "node --no-deprecation tray.js",
-    "start:no-tray": "node --no-deprecation index.js",
+    "start:cli": "node --no-deprecation index.js",
     "build": "bun build tray.js --compile --target=bun-windows-x64 --outfile dist/claude-rpc.exe --icon logo/anthropic-rpc.ico",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
-  "bin": "tray.js",
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "discord",
+    "rpc",
+    "rich-presence",
+    "claude",
+    "anthropic"
+  ],
+  "author": "StealthyLabs",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
@@ -19,6 +26,18 @@
     "dotenv": "^17.3.1"
   },
   "devDependencies": {
-    "sharp": "^0.34.5"
-  }
+    "sharp": "^0.34.5",
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "index.js",
+    "tray.js",
+    "secure-env.js",
+    "logo/",
+    ".env",
+    "README.md"
+  ]
 }

@@ -17,9 +17,14 @@
 - **Extended thinking**: shows when Extended mode is enabled
 - **1M context detection**: displays (1M) for supported models
 - **Session elapsed time**: linked to your actual session
-- **Idle timeout**: shows Away after 15 minutes of inactivity
+- **Multi-instance**: shows instance count when multiple Claude Code are running
+- **Idle timeout**: shows Away after 15 minutes of inactivity (configurable)
+- **Do Not Disturb**: hide your presence when you need focus
 - **System tray**: Start on boot toggle (Windows)
 - **Zero config**: no Discord Application ID needed
+- **Webhook notifications**: optional Discord webhook for session events
+- **Config file**: persistent preferences at `~/.claude-rpc/config.json`
+- **Logging**: debug logs at `~/.claude-rpc/rpc.log`
 - **Security hardened**: audit passed, all findings fixed
 
 ## Installation
@@ -42,18 +47,54 @@ cd claude-rpc
 npm install
 ```
 
-**Windows:** Double-click **`start-claude.bat`**
-
-**macOS/Linux:**
+**With system tray (Windows):**
 ```bash
-chmod +x start-claude.sh
-./start-claude.sh
+npm start
 ```
 
-Or run directly:
+**Console mode (all platforms):**
+```bash
+npm run start:cli
+```
+
+**Or run directly:**
 ```bash
 node --no-deprecation index.js
 ```
+
+## CLI Flags
+
+```
+claude-rpc [options]
+
+  -v, --version    Show version number
+  -h, --help       Show help message
+  --verbose        Enable verbose console output
+  --dnd            Start in Do Not Disturb mode
+  --no-idle        Disable idle timeout
+```
+
+## Configuration
+
+Claude RPC uses a config file at `~/.claude-rpc/config.json`. Create it to customize behavior:
+
+```json
+{
+  "idleTimeoutMinutes": 15,
+  "logoMode": "url",
+  "dnd": false,
+  "verbose": false,
+  "webhookUrl": null
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `idleTimeoutMinutes` | number | `15` | Minutes before showing Away (0 = disabled) |
+| `logoMode` | string | `"url"` | Logo source: `"url"` (GitHub) or `"asset"` (Discord app) |
+| `dnd` | boolean | `false` | Do Not Disturb — hides presence |
+| `verbose` | boolean | `false` | Verbose console logging |
+| `webhookUrl` | string | `null` | Discord webhook URL for session notifications |
 
 ## Auto-detection
 
@@ -65,21 +106,31 @@ node --no-deprecation index.js
 | **Code model** | `~/.claude/settings.json` or session JSONL |
 | **Provider** | Environment variables, API key patterns, OAuth credentials |
 | **Session time** | First timestamp in the active session JSONL |
+| **Multi-instance** | Process count from watcher |
 
 ## Platform Support
 
-| Feature | Windows | macOS |
-|---------|---------|-------|
-| Claude Code detection | Full | Full |
-| Claude Desktop detection | Full (UI Automation) | Basic (AppleScript) |
-| Desktop mode (Chat/Cowork/Code) | Full | Requires accessibility |
-| Desktop model detection | Full | Via JSONL only |
-| System tray | Full (Start on boot) | Terminal mode |
-| Standalone exe | Yes (.exe + bundled Node.js) | Run from source |
+| Feature | Windows | macOS | Linux |
+|---------|---------|-------|-------|
+| Claude Code detection | Full | Full | Full |
+| Claude Desktop detection | Full (UI Automation) | Basic (AppleScript) | N/A |
+| Desktop mode (Chat/Cowork/Code) | Full | Requires accessibility | N/A |
+| Desktop model detection | Full | Via JSONL only | N/A |
+| System tray | Full (Start on boot) | Terminal mode | Terminal mode |
+| Standalone exe | Yes (.exe + bundled Node.js) | Run from source | Run from source |
+
+## Debugging
+
+Logs are written to `~/.claude-rpc/rpc.log` (auto-rotated at 1 MB).
+
+Run with verbose mode for console output:
+```bash
+node index.js --verbose
+```
 
 ## Requirements
 
-- **Windows** 10/11 or **macOS** 12+
+- **Windows** 10/11 or **macOS** 12+ or **Linux**
 - [Discord](https://discord.com/) desktop client running
 - [Claude Code](https://claude.ai/code) or [Claude Desktop](https://claude.ai/download)
 

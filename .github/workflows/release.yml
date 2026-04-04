@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install production deps for runtime
+        run: |
+          mkdir dist\runtime
+          copy index.js dist\runtime\
+          copy tray.js dist\runtime\
+          copy secure-env.js dist\runtime\
+          copy package.json dist\runtime\
+          if exist .env copy .env dist\runtime\
+          cd dist\runtime
+          npm install --omit=dev --ignore-scripts --no-fund --no-audit
+
+      - name: Bundle node.exe
+        run: copy "$env:ProgramFiles\nodejs\node.exe" dist\runtime\node.exe
+        shell: pwsh
+
+      - name: Copy logo
+        run: |
+          mkdir dist\logo
+          copy logo\* dist\logo\
+
+      - name: Create archive
+        run: Compress-Archive -Path dist\* -DestinationPath claude-rpc-windows-x64.zip
+        shell: pwsh
+
+      - name: Upload release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: claude-rpc-windows-x64.zip
+          generate_release_notes: true
