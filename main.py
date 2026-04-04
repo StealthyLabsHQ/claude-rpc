@@ -1,4 +1,4 @@
-"""Claude RPC — Tray wrapper that launches Node.js RPC from runtime/."""
+"""Claude RPC - Tray wrapper that launches Node.js RPC from runtime/."""
 
 import os
 import signal
@@ -22,7 +22,7 @@ def acquire_single_instance():
         _mutex_handle = ctypes.windll.kernel32.CreateMutexW(
             None, True, 'Global\\ClaudeRPC_SingleInstance')
         if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
-            sys.exit(0)  # silent exit — another instance owns the mutex
+            sys.exit(0)  # silent exit - another instance owns the mutex
     else:
         # Unix fallback: lock file
         lock_dir = os.path.join(os.path.expanduser('~'), '.claude-rpc')
@@ -150,7 +150,7 @@ def start_node():
 
     if not node:
         tray_status['text'] = 'Error: Node.js not found'
-        print('Error: node.exe not found — put node.exe in the runtime/ folder')
+        print('Error: node.exe not found - put node.exe in the runtime/ folder')
         return
     if not index_js:
         tray_status['text'] = 'Error: index.js not found'

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Anthropic Rich Presence — macOS/Linux launcher
+# Anthropic Rich Presence - macOS/Linux launcher
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"

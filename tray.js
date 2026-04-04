@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * tray.js — Claude RPC with system tray support
+ * tray.js - Claude RPC with system tray support
  *
  * Entry points:
  *   npm start          → tray.js  (with system tray on Windows)
@@ -33,7 +33,7 @@ const rpc = require('./index');
 const engine = rpc.start();
 
 if (NO_TRAY) {
-  // Console-only mode — index.js handles everything
+  // Console-only mode - index.js handles everything
   process.exit = process.exit; // keep alive
 } else {
   // --- Windows system tray via PowerShell ---
@@ -83,7 +83,7 @@ function startWindowsTray() {
   });
 
   tray.on('exit', () => {
-    // Tray closed — keep RPC running in console mode
+    // Tray closed - keep RPC running in console mode
   });
 
   // Cleanup tray on exit

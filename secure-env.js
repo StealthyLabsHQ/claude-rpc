@@ -1,4 +1,4 @@
-// Secure .env storage — DPAPI on Windows, Keychain on macOS
+// Secure .env storage - DPAPI on Windows, Keychain on macOS
 // Encrypts .env values tied to the current user account
 
 const fs = require('fs');
