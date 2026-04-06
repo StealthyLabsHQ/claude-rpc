@@ -1,14 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-from PyInstaller.building.datastruct import Tree
-
-# node_modules tree — Tree() handles recursive dirs correctly
-node_tree = Tree(
-    'build/runtime/node_modules',
-    prefix='runtime/node_modules',
-    excludes=['.bin', '__pycache__'],
-)
-
 a = Analysis(
     ['main.py'],
     pathex=[],
@@ -18,13 +9,10 @@ a = Analysis(
         ('logo/tray-icon.png',       'logo'),
         ('logo/discord.png',         'logo'),
         ('logo/anthropic-rpc.ico',   'logo'),
-        # JS runtime files
-        ('build/runtime/index.js',      'runtime'),
-        ('build/runtime/tray.js',       'runtime'),
-        ('build/runtime/secure-env.js', 'runtime'),
-        ('build/runtime/package.json',  'runtime'),
+        # esbuild bundle (replaces index.js + node_modules entirely)
+        ('build/bundle.js',          'runtime'),
         # node.exe (~67 MB)
-        ('build/runtime/node.exe',      'runtime'),
+        ('build/runtime/node.exe',   'runtime'),
     ],
     hiddenimports=[],
     hookspath=[],
@@ -34,9 +22,6 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
-
-# Append node_modules tree to analysis datas (TOC format, compatible)
-a.datas += node_tree
 
 pyz = PYZ(a.pure)
 
