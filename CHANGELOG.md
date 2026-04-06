@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.2.1 (2026-04-06)
+
+### Security
+- **Pin Python deps to exact versions** - `requirements.txt` switched from `>=` to `==` for all 5 deps (`pystray`, `Pillow`, `python-dotenv`, `watchdog`, `uiautomation`), eliminating the supply-chain risk of unpinned PyPI resolution at release build time
+
+### Removed
+- `psutil` and `keyring` from `requirements.txt` - orphaned by removal of `presence.py` and `secure_env.py`
+
+### Fixed
+- `version_info.txt` version corrected to `2.2.0.0` (was incorrectly set to `2.1.0.0`)
+
 ## v2.2.0 (2026-04-04)
 
 ### Added
