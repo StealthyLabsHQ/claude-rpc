@@ -1,6 +1,6 @@
 {
   "name": "claude-rpc",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "Discord Rich Presence for Claude AI",
   "main": "index.js",
   "bin": "tray.js",
