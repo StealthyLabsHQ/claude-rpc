@@ -172,12 +172,11 @@ function start() {
   acquireLock();
   log('info', `claude-rpc v${require('./package.json').version} starting (PID ${process.pid})`);
 
-  const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
-  if (!CLIENT_ID || !VALID_CLIENT_ID.test(CLIENT_ID)) {
-    log('error', 'DISCORD_CLIENT_ID missing or invalid in .env (expected 17-20 digit snowflake)');
-    console.error('DISCORD_CLIENT_ID missing or invalid in .env (expected 17-20 digit snowflake)');
-    process.exit(1);
-  }
+  const DEFAULT_CLIENT_ID = '1483898157854363799';
+  const CLIENT_ID = (process.env.DISCORD_CLIENT_ID && VALID_CLIENT_ID.test(process.env.DISCORD_CLIENT_ID))
+    ? process.env.DISCORD_CLIENT_ID
+    : DEFAULT_CLIENT_ID;
+  log('info', `Using Discord client ID: ${CLIENT_ID}${CLIENT_ID === DEFAULT_CLIENT_ID ? ' (default)' : ''}`);
 
   let client = new Client({ clientId: CLIENT_ID });
 
