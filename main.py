@@ -57,10 +57,19 @@ def get_exe_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def get_resource_dir():
+    """Where embedded resources live: _MEIPASS in onefile builds, exe_dir otherwise."""
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        return sys._MEIPASS
+    return get_exe_dir()
+
+
 def find_node():
-    """Find node.exe: dist\runtime\ first, then system PATH."""
+    """Find node.exe: embedded resources first, then system PATH."""
+    res_dir = get_resource_dir()
     exe_dir = get_exe_dir()
     for candidate in [
+        os.path.join(res_dir, 'runtime', 'node.exe'),
         os.path.join(exe_dir, 'runtime', 'node.exe'),
         os.path.join(exe_dir, 'node.exe'),
     ]:
@@ -71,9 +80,11 @@ def find_node():
 
 
 def find_index_js():
-    """Find index.js: dist\runtime\ first, then script dir."""
+    """Find index.js: embedded resources first, then exe dir."""
+    res_dir = get_resource_dir()
     exe_dir = get_exe_dir()
     for candidate in [
+        os.path.join(res_dir, 'runtime', 'index.js'),
         os.path.join(exe_dir, 'runtime', 'index.js'),
         os.path.join(exe_dir, 'index.js'),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), 'index.js'),
@@ -158,10 +169,22 @@ def start_node():
         return
 
     env = os.environ.copy()
-    # Load .env from runtime/ if present
-    runtime_dir = os.path.join(get_exe_dir(), 'runtime')
-    env_file = os.path.join(runtime_dir if os.path.isdir(runtime_dir) else os.path.dirname(index_js), '.env')
-    if os.path.exists(env_file):
+    # Set NODE_PATH so node finds node_modules regardless of PyInstaller extraction nesting
+    _nm = os.path.join(get_resource_dir(), 'runtime', 'node_modules')
+    # PyInstaller may extract to a doubled path: node_modules/node_modules/
+    _nm_nested = os.path.join(_nm, 'node_modules')
+    node_modules_path = _nm_nested if os.path.isdir(_nm_nested) else _nm
+    if os.path.isdir(node_modules_path):
+        existing = env.get('NODE_PATH', '')
+        env['NODE_PATH'] = node_modules_path + (os.pathsep + existing if existing else '')
+    # Load .env — check next to EXE first (user config), then embedded runtime/
+    _env_candidates = [
+        os.path.join(get_exe_dir(), '.env'),
+        os.path.join(get_resource_dir(), 'runtime', '.env'),
+        os.path.join(os.path.dirname(index_js), '.env'),
+    ]
+    env_file = next((p for p in _env_candidates if os.path.exists(p)), None)
+    if env_file and os.path.exists(env_file):
         with open(env_file, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
@@ -217,9 +240,15 @@ IS_WINDOWS = sys.platform == 'win32'
 
 
 def get_icon_path():
+    res_dir = get_resource_dir()
     exe_dir = get_exe_dir()
-    p = os.path.join(exe_dir, 'logo', 'tray-icon.png')
-    return p if os.path.exists(p) else None
+    for p in [
+        os.path.join(res_dir, 'logo', 'tray-icon.png'),
+        os.path.join(exe_dir, 'logo', 'tray-icon.png'),
+    ]:
+        if os.path.exists(p):
+            return p
+    return None
 
 
 def start_with_tray(stop_event):
