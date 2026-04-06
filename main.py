@@ -80,10 +80,12 @@ def find_node():
 
 
 def find_index_js():
-    """Find index.js: embedded resources first, then exe dir."""
+    """Find bundle.js (esbuild) or index.js fallback."""
     res_dir = get_resource_dir()
     exe_dir = get_exe_dir()
     for candidate in [
+        os.path.join(res_dir, 'runtime', 'bundle.js'),
+        os.path.join(exe_dir, 'runtime', 'bundle.js'),
         os.path.join(res_dir, 'runtime', 'index.js'),
         os.path.join(exe_dir, 'runtime', 'index.js'),
         os.path.join(exe_dir, 'index.js'),
@@ -169,14 +171,6 @@ def start_node():
         return
 
     env = os.environ.copy()
-    # Set NODE_PATH so node finds node_modules regardless of PyInstaller extraction nesting
-    _nm = os.path.join(get_resource_dir(), 'runtime', 'node_modules')
-    # PyInstaller may extract to a doubled path: node_modules/node_modules/
-    _nm_nested = os.path.join(_nm, 'node_modules')
-    node_modules_path = _nm_nested if os.path.isdir(_nm_nested) else _nm
-    if os.path.isdir(node_modules_path):
-        existing = env.get('NODE_PATH', '')
-        env['NODE_PATH'] = node_modules_path + (os.pathsep + existing if existing else '')
     # Load .env — check next to EXE first (user config), then embedded runtime/
     _env_candidates = [
         os.path.join(get_exe_dir(), '.env'),
