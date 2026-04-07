@@ -2,8 +2,9 @@
 'use strict';
 
 /**
- * launcher.js — Replaces main.py entirely.
- * Single instance + system tray (PowerShell) + RPC engine, Node.js only.
+ * launcher.js — Pure Node.js alternative to main.py (experimental).
+ * Single instance + system tray (PowerShell) + RPC engine, no Python needed.
+ * NOTE: Not used in the default build. main.py + PyInstaller is the production path.
  */
 
 const net   = require('net');
