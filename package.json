@@ -1,6 +1,6 @@
 {
   "name": "claude-rpc",
-  "version": "2.2.1",
+  "version": "2.3.0",
   "description": "Discord Rich Presence for Claude AI",
   "main": "index.js",
   "bin": "tray.js",
@@ -8,6 +8,7 @@
     "start": "node --no-deprecation tray.js",
     "start:cli": "node --no-deprecation index.js",
     "build": "bun build tray.js --compile --target=bun-windows-x64 --outfile dist/claude-rpc.exe --icon logo/anthropic-rpc.ico",
+    "build:sea": "node --experimental-sea-config sea-config.json",
     "test": "vitest run",
     "test:watch": "vitest"
   },

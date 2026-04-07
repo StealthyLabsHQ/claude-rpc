@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.3.0 (2026-04-07)
+
+### Added
+- **Node.js SEA support** — `sea-config.json` for single-executable builds without node_modules
+- **`launcher.js`** — unified entry point with single-instance lock (Windows named pipe), embedded tray icon, and proper signal cleanup
+- **`build:sea`** npm script for reproducible SEA blob generation
+- **`logo/tray-icon.b64`** — base64-encoded PNG tray icon source file
+
+### Fixed
+- **Tray process leak** — SIGINT/SIGTERM now explicitly kill the PowerShell tray before exit
+- **SEA startup warning** — `disableExperimentalSEAWarning` added to `sea-config.json`
+
+### Changed
+- Tray icon loaded from `logo/tray-icon.b64` at runtime instead of inline base64 constant
+- `.gitignore` now excludes `.claude/` local settings directory
+
 ## v2.2.1 (2026-04-06)
 
 ### Security
