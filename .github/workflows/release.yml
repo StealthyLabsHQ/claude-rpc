@@ -44,7 +44,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist\runtime | Out-Null
           Copy-Item index.js dist\runtime\
           Copy-Item tray.js dist\runtime\
-          Copy-Item launcher.js dist\runtime\
           Copy-Item secure-env.js dist\runtime\
           Copy-Item package.json dist\runtime\
           if (Test-Path .env) { Copy-Item .env dist\runtime\ }

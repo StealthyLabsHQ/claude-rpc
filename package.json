@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node --no-deprecation tray.js",
     "start:cli": "node --no-deprecation index.js",
-    "build": "bun build tray.js --compile --target=bun-windows-x64 --outfile dist/claude-rpc.exe --icon logo/anthropic-rpc.ico && node -e \"const f=require('fs'),b=f.readFileSync('dist/claude-rpc.exe');b.writeUInt16LE(2,b.readUInt32LE(0x3C)+0x5C);f.writeFileSync('dist/claude-rpc.exe',b)\"",
+    "build": "node scripts/build-dist.js",
     "build:sea": "node --experimental-sea-config sea-config.json",
     "test": "vitest run",
     "test:watch": "vitest"

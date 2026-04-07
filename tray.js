@@ -79,11 +79,6 @@ function startWindowsTray() {
 
   tray.on('error', (err) => {
     console.error('Tray icon failed:', err.message);
-    console.log('Running in console mode.');
-  });
-
-  tray.on('exit', () => {
-    // Tray closed - keep RPC running in console mode
   });
 
   // Cleanup tray on exit
