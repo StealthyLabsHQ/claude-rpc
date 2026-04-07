@@ -24,8 +24,31 @@ jobs:
 
       - run: npm ci
 
-      # --- Build Python tray exe ---
-      - name: Build claude-rpc.exe (PyInstaller)
+      # --- Prepare runtime staging ---
+      - name: Stage runtime
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path build\staging\runtime | Out-Null
+          Copy-Item index.js build\staging\runtime\
+          Copy-Item tray.js build\staging\runtime\
+          Copy-Item secure-env.js build\staging\runtime\
+          Copy-Item package.json build\staging\runtime\
+          if (Test-Path .env) { Copy-Item .env build\staging\runtime\ }
+          Set-Location build\staging\runtime
+          npm install --omit=dev --ignore-scripts --no-fund --no-audit
+
+      - name: Bundle node.exe into staging
+        shell: pwsh
+        run: Copy-Item "$env:ProgramFiles\nodejs\node.exe" build\staging\runtime\node.exe
+
+      - name: Stage logo
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path build\staging\logo | Out-Null
+          Copy-Item logo\* build\staging\logo\
+
+      # --- Build single all-in-one exe ---
+      - name: Build claude-rpc.exe (PyInstaller all-in-one)
         shell: pwsh
         run: |
           pip install pyinstaller==6.14.1 pyinstaller-versionfile==2.1.1 -r requirements.txt --quiet
@@ -35,37 +58,12 @@ jobs:
             --name=claude-rpc `
             --distpath=dist `
             --version-file=version_info.txt `
+            --add-data="build\staging\runtime;runtime" `
+            --add-data="build\staging\logo;logo" `
             main.py
-
-      # --- Prepare Node.js runtime ---
-      - name: Install production deps for runtime
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist\runtime | Out-Null
-          Copy-Item index.js dist\runtime\
-          Copy-Item tray.js dist\runtime\
-          Copy-Item secure-env.js dist\runtime\
-          Copy-Item package.json dist\runtime\
-          if (Test-Path .env) { Copy-Item .env dist\runtime\ }
-          Set-Location dist\runtime
-          npm install --omit=dev --ignore-scripts --no-fund --no-audit
-
-      - name: Bundle node.exe
-        shell: pwsh
-        run: Copy-Item "$env:ProgramFiles\nodejs\node.exe" dist\runtime\node.exe
-
-      - name: Copy logo
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist\logo | Out-Null
-          Copy-Item logo\* dist\logo\
-
-      - name: Create archive
-        shell: pwsh
-        run: Compress-Archive -Path dist\* -DestinationPath claude-rpc-windows-x64.zip
 
       - name: Upload release
         uses: softprops/action-gh-release@v2
         with:
-          files: claude-rpc-windows-x64.zip
+          files: dist/claude-rpc.exe
           generate_release_notes: true
