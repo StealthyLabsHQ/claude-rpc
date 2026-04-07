@@ -7,7 +7,7 @@
  * Embeds runtime/ (node.exe + JS + node_modules) and logo/ inside
  * a PyInstaller --onefile --windowed exe. Zero console on launch.
  *
- * Output: dist/claude-rpc.exe (~80 MB, self-extracting)
+ * Output: dist/claude-rpc.exe (~47 MB, self-extracting)
  */
 
 const fs = require('fs');

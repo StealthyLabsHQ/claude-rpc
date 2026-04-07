@@ -7,7 +7,7 @@
  * Entry points:
  *   npm start          → tray.js  (with system tray on Windows)
  *   npm run start:cli  → index.js (console only)
- *   npm run build      → standalone exe via bun compile
+ *   npm run build      → all-in-one exe via PyInstaller + node.exe runtime
  *
  * On Windows: spawns a PowerShell NotifyIcon for system tray.
  * On macOS/Linux: runs in console mode (use main.py for pystray tray).

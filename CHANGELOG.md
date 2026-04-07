@@ -3,18 +3,18 @@
 ## v2.3.0 (2026-04-07)
 
 ### Added
-- **`launcher.js`** — unified entry point with single-instance lock (Windows named pipe), embedded tray icon, and proper signal cleanup
-- **`scripts/build-dist.js`** — local build script reproducing the release architecture (PyInstaller exe + Node.js runtime)
-- **`build:sea`** npm script for Node.js Single Executable Application builds
+- **All-in-one exe** — single `claude-rpc.exe` (~47 MB) embeds node.exe, JS runtime, node_modules, and logo assets. No external folders needed — double-click and go.
+- **`scripts/build-dist.js`** — local build script matching the release CI pipeline
+- **`launcher.js`** — experimental pure Node.js launcher with single-instance lock (Windows named pipe), not used in default build
 - **`logo/tray-icon.b64`** — base64-encoded PNG tray icon source file
-- **`sea-config.json`** — SEA configuration with `disableExperimentalSEAWarning`
+- **`sea-config.json`** + `build:sea` npm script — experimental Node.js Single Executable Application support
 
 ### Fixed
-- **No more console window** — `claude-rpc.exe` uses PyInstaller `--windowed` (GUI subsystem) + `node.exe` with `CREATE_NO_WINDOW`, matching the v2.2.x release behavior
+- **Zero console window** — PyInstaller `--windowed` (GUI subsystem) + `node.exe` with `CREATE_NO_WINDOW` ensures no CMD/PowerShell flash on launch
 - **Tray process leak** — SIGINT/SIGTERM now explicitly kill the PowerShell tray before exit
 
 ### Changed
-- **Build architecture** — replaced bun compile with PyInstaller launcher + bundled `node.exe` runtime (same as release CI), ensuring `windowsHide` works correctly for the PowerShell tray
+- **Release artifact** — single exe replaces the previous zip archive (exe + runtime/ + logo/)
 - Tray icon loaded from `logo/tray-icon.b64` at runtime instead of inline base64 constant
 - `.gitignore` now excludes `.claude/` local settings directory
 
