@@ -3,16 +3,18 @@
 ## v2.3.0 (2026-04-07)
 
 ### Added
-- **Node.js SEA support** — `sea-config.json` for single-executable builds without node_modules
 - **`launcher.js`** — unified entry point with single-instance lock (Windows named pipe), embedded tray icon, and proper signal cleanup
-- **`build:sea`** npm script for reproducible SEA blob generation
+- **`scripts/build-dist.js`** — local build script reproducing the release architecture (PyInstaller exe + Node.js runtime)
+- **`build:sea`** npm script for Node.js Single Executable Application builds
 - **`logo/tray-icon.b64`** — base64-encoded PNG tray icon source file
+- **`sea-config.json`** — SEA configuration with `disableExperimentalSEAWarning`
 
 ### Fixed
+- **No more console window** — `claude-rpc.exe` uses PyInstaller `--windowed` (GUI subsystem) + `node.exe` with `CREATE_NO_WINDOW`, matching the v2.2.x release behavior
 - **Tray process leak** — SIGINT/SIGTERM now explicitly kill the PowerShell tray before exit
-- **SEA startup warning** — `disableExperimentalSEAWarning` added to `sea-config.json`
 
 ### Changed
+- **Build architecture** — replaced bun compile with PyInstaller launcher + bundled `node.exe` runtime (same as release CI), ensuring `windowsHide` works correctly for the PowerShell tray
 - Tray icon loaded from `logo/tray-icon.b64` at runtime instead of inline base64 constant
 - `.gitignore` now excludes `.claude/` local settings directory
 
