@@ -123,7 +123,6 @@ describe('sanitizeString', () => {
 
 describe('config', () => {
   it('DEFAULT_CONFIG has expected keys', () => {
-    expect(DEFAULT_CONFIG).toHaveProperty('idleTimeoutMinutes', 15);
     expect(DEFAULT_CONFIG).toHaveProperty('logoMode', 'url');
     expect(DEFAULT_CONFIG).toHaveProperty('dnd', false);
     expect(DEFAULT_CONFIG).toHaveProperty('verbose', false);
@@ -132,8 +131,8 @@ describe('config', () => {
 
   it('loadConfig returns defaults when no config file exists', () => {
     const cfg = loadConfig();
-    expect(cfg.idleTimeoutMinutes).toBe(15);
     expect(cfg.dnd).toBe(false);
+    expect(cfg.logoMode).toBe('url');
   });
 });
 

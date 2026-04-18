@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.4.0 (2026-04-18)
+
+### Removed
+- **Away / Idle / inactive states** — no more "Away" or "Idle" in Discord presence. While a Claude session (CLI or Desktop) is running, the presence reflects the live state; when no session is running, the presence is **cleared** instead of showing an Idle placeholder.
+- `idleTimeoutMinutes` config key and `--no-idle` CLI flag (removed: always disabled now).
+- PowerShell watcher `GetLastInputInfo` plumbing (`inputAgoMs` field). Watcher bumped to v23 without it.
+
 ## v2.3.5 (2026-04-18)
 
 ### Changed

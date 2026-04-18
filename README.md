@@ -75,7 +75,6 @@ claude-rpc [options]
   -h, --help       Show help message
   --verbose        Enable verbose console output
   --dnd            Start in Do Not Disturb mode
-  --no-idle        Disable idle timeout
 ```
 
 ## Configuration
@@ -84,7 +83,6 @@ Claude Rich Presence uses a config file at `~/.claude-rpc/config.json`. Create i
 
 ```json
 {
-  "idleTimeoutMinutes": 15,
   "logoMode": "url",
   "dnd": false,
   "verbose": false,
@@ -94,7 +92,6 @@ Claude Rich Presence uses a config file at `~/.claude-rpc/config.json`. Create i
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `idleTimeoutMinutes` | number | `15` | Minutes before showing Away (0 = disabled) |
 | `logoMode` | string | `"url"` | Logo source: `"url"` (GitHub) or `"asset"` (Discord app) |
 | `dnd` | boolean | `false` | Do Not Disturb - hides presence |
 | `verbose` | boolean | `false` | Verbose console logging |
