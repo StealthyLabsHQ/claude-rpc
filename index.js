@@ -232,7 +232,7 @@ function start() {
   const IS_LINUX = process.platform === 'linux';
   const WATCHER_INTERVAL_MS = 500;
   const WATCHER_SCRIPT_PATH = path.join(RPC_DIR, IS_WINDOWS ? 'claude-rpc-watcher.ps1' : 'claude-rpc-watcher.sh');
-  const WATCHER_VERSION = '21';
+  const WATCHER_VERSION = '22';
 
   let watcherState = {
     client: null,
@@ -243,6 +243,7 @@ function start() {
     adaptive: false,
     extended: false,
     codeInstances: 0,
+    inputAgoMs: null,
   };
   let watcherProcess = null;
   let watcherRestarts = 0;
@@ -262,6 +263,24 @@ function start() {
       fs.writeFileSync(WATCHER_SCRIPT_PATH, `# v${WATCHER_VERSION}
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class ClaudeRpcIdle {
+    [DllImport("user32.dll")]
+    public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+    [StructLayout(LayoutKind.Sequential)]
+    public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+    public static long GetIdleMs() {
+        LASTINPUTINFO lii = new LASTINPUTINFO();
+        lii.cbSize = (uint)Marshal.SizeOf(lii);
+        if (!GetLastInputInfo(ref lii)) return -1;
+        uint now = (uint)Environment.TickCount;
+        return (long)(now - lii.dwTime);
+    }
+}
+"@
 
 $intervalMs = ${WATCHER_INTERVAL_MS}
 $appData = [Environment]::GetFolderPath("ApplicationData")
@@ -600,6 +619,9 @@ while ($true) {
         $client = "code"
     }
 
+    $inputAgoMs = -1
+    try { $inputAgoMs = [ClaudeRpcIdle]::GetIdleMs() } catch {}
+
     $clientSafe = $client -replace '"', ''
     $modeSafe = $mode -replace '"', ''
     $submodeSafe = $submode -replace '"', ''
@@ -609,7 +631,7 @@ while ($true) {
     $extendedSafe = if ($extended) { "true" } else { "false" }
     $adaptiveSeenSafe = if ($adaptiveSeen) { "true" } else { "false" }
     $extendedSeenSafe = if ($extendedSeen) { "true" } else { "false" }
-    $json = "{""client"":""" + $clientSafe + """,""mode"":""" + $modeSafe + """,""submode"":""" + $submodeSafe + """,""model"":""" + $modelSafe + """,""effort"":""" + $effortSafe + """,""adaptive"":" + $adaptiveSafe + ",""extended"":" + $extendedSafe + ",""adaptiveSeen"":" + $adaptiveSeenSafe + ",""extendedSeen"":" + $extendedSeenSafe + ",""codeInstances"":" + $codeCount + "}"
+    $json = "{""client"":""" + $clientSafe + """,""mode"":""" + $modeSafe + """,""submode"":""" + $submodeSafe + """,""model"":""" + $modelSafe + """,""effort"":""" + $effortSafe + """,""adaptive"":" + $adaptiveSafe + ",""extended"":" + $extendedSafe + ",""adaptiveSeen"":" + $adaptiveSeenSafe + ",""extendedSeen"":" + $extendedSeenSafe + ",""codeInstances"":" + $codeCount + ",""inputAgoMs"":" + $inputAgoMs + "}"
     [Console]::Out.WriteLine($json)
     [Console]::Out.Flush()
     Start-Sleep -Milliseconds $intervalMs
@@ -705,6 +727,10 @@ done
           watcherState.submode = data.submode || null;
           watcherState.codeInstances = data.codeInstances || 0;
           watcherState.effort = data.effort || null;
+          const prevInputAgoMs = watcherState.inputAgoMs;
+          watcherState.inputAgoMs = (typeof data.inputAgoMs === 'number' && data.inputAgoMs >= 0) ? data.inputAgoMs : null;
+          // Fire presence refresh immediately when input activity is newly observed
+          if (watcherState.inputAgoMs !== null && prevInputAgoMs === null) triggerUpdate();
 
           const nextModel = data.model || null;
           const modelChanged = nextModel !== prevModel;
@@ -733,6 +759,7 @@ done
         adaptive: false,
         extended: false,
         codeInstances: 0,
+        inputAgoMs: null,
       };
       watcherLastUpdate = 0;
       watcherRestarts++;
@@ -1170,6 +1197,13 @@ done
   function isSessionIdle(sessionFile) {
     if (IDLE_TIMEOUT_MS === 0) return false; // Idle disabled
     if (!sessionFile) return true;
+    // Grace window on cold start — watcher may not have reported input yet
+    if ((Date.now() - processStartTime) < STARTUP_GRACE_MS) return false;
+    // Primary signal: system keyboard/mouse activity (typing in CLI doesn't bump session file mtime)
+    if (watcherState.inputAgoMs !== null) {
+      return watcherState.inputAgoMs > IDLE_TIMEOUT_MS;
+    }
+    // Fallback when input info unavailable (non-Windows or PS P/Invoke failed): session file mtime
     try {
       const mtime = fs.statSync(sessionFile).mtimeMs;
       return (Date.now() - mtime) > IDLE_TIMEOUT_MS;
@@ -1235,6 +1269,9 @@ done
   // --- Main loop ---
 
   const UPDATE_INTERVAL = 1_000;
+  const STARTUP_GRACE_MS = 15_000; // don't mark Away during startup warm-up
+  const processStartTime = Date.now();
+  let triggerUpdate = () => {};
 
   let currentClient = null;
   let cachedSessionStart = null;
@@ -1403,7 +1440,7 @@ done
           const displayModel = (!idle && detected === 'code') ? appendCodeEffort(cachedModel) : cachedModel;
           const a = buildActivity(activityType, idle ? null : cachedSessionStats, cachedProjectName, isThinking, displayModel);
           const activityPayload = {
-            type: 3,
+            type: 0,
             name: 'Claude AI',
             details: a.details,
             state: a.state,
@@ -1436,7 +1473,7 @@ done
 
           const a = buildActivity('idle', null, null, false, null);
           const activityPayload = {
-            type: 3,
+            type: 0,
             name: 'Claude AI',
             details: a.details,
             state: a.state,
@@ -1455,6 +1492,7 @@ done
         }
       }
 
+      triggerUpdate = update;
       update();
       setInterval(update, UPDATE_INTERVAL);
     });
