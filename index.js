@@ -44,6 +44,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+const TRAY_APP_NAME = 'Claude Rich Presence';
+
 // --- Logging ---
 
 const RPC_DIR = path.join(os.homedir(), '.claude-rpc');
@@ -228,11 +230,20 @@ function start() {
   const IS_MACOS = process.platform === 'darwin';
   const IS_WINDOWS = process.platform === 'win32';
   const IS_LINUX = process.platform === 'linux';
-  const WATCHER_INTERVAL_MS = 1000;
+  const WATCHER_INTERVAL_MS = 500;
   const WATCHER_SCRIPT_PATH = path.join(RPC_DIR, IS_WINDOWS ? 'claude-rpc-watcher.ps1' : 'claude-rpc-watcher.sh');
-  const WATCHER_VERSION = '11';
+  const WATCHER_VERSION = '21';
 
-  let watcherState = { client: null, mode: null, model: null, extended: false, codeInstances: 0 };
+  let watcherState = {
+    client: null,
+    mode: null,
+    submode: null,
+    model: null,
+    effort: null,
+    adaptive: false,
+    extended: false,
+    codeInstances: 0,
+  };
   let watcherProcess = null;
   let watcherRestarts = 0;
   let watcherLastUpdate = 0;
@@ -253,11 +264,186 @@ Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 
 $intervalMs = ${WATCHER_INTERVAL_MS}
+$appData = [Environment]::GetFolderPath("ApplicationData")
+$desktopConfigPath = Join-Path $appData "Claude\\claude_desktop_config.json"
+
+function Convert-DesktopSidebarMode($rawMode) {
+    if (-not $rawMode) { return "" }
+    switch ($rawMode.ToString().ToLowerInvariant()) {
+        "epitaxy" { return "Cowork" }
+        "cowork" { return "Cowork" }
+        "chat" { return "Chat" }
+        "code" { return "Code" }
+        default { return "" }
+    }
+}
+
+function Parse-DesktopModel($rawName) {
+    if (-not $rawName) { return $null }
+    $name = $rawName.ToString().Trim()
+    if (-not $name) { return $null }
+
+    $match = [regex]::Match($name, '^(?:Claude\\s+)?(Opus|Sonnet|Haiku)\\s+(\\d+\\.\\d+)(?:\\s+(1M))?(?:\\s+(Adaptive|Extended))?(?:\\s*\\u00b7\\s*(Low|Medium|High|Extra high|Max))?(?:\\s+.*)?$', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($match.Success) {
+        $familyRaw = $match.Groups[1].Value
+        $family = $familyRaw.Substring(0, 1).ToUpper() + $familyRaw.Substring(1).ToLower()
+        $ctx = $match.Groups[3].Value
+        $suffix = $match.Groups[4].Value
+        $effort = $match.Groups[5].Value
+        $modelStr = "$family $($match.Groups[2].Value)"
+        if ($ctx) { $modelStr = "$modelStr $ctx" }
+        return @{
+            model = $modelStr
+            adaptive = $suffix -ieq 'Adaptive'
+            extended = $suffix -ieq 'Extended'
+            effort = $effort
+        }
+    }
+
+    $match = [regex]::Match($name, '^claude-(opus|sonnet|haiku)-(\\d+)-(\\d+)(?:\\[[^\\]]+\\])?$', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($match.Success) {
+        $familyRaw = $match.Groups[1].Value
+        $family = $familyRaw.Substring(0, 1).ToUpper() + $familyRaw.Substring(1).ToLower()
+        return @{
+            model = "$family $($match.Groups[2].Value).$($match.Groups[3].Value)"
+            adaptive = $false
+            extended = $false
+        }
+    }
+
+    return $null
+}
+
+function Get-DesktopUiState($names, $fallbackMode) {
+    $scores = @{
+        Cowork = 0
+        Code = 0
+        Chat = 0
+    }
+    $state = @{
+        mode = $fallbackMode
+        submode = ""
+        model = ""
+        adaptive = $false
+        extended = $false
+        adaptiveSeen = $false
+        extendedSeen = $false
+    }
+    $dispatchHit = $false
+
+    foreach ($rawName in $names) {
+        if (-not $rawName) { continue }
+        $name = $rawName.ToString().Trim()
+        if (-not $name) { continue }
+        $lower = $name.ToLowerInvariant()
+
+        switch ($lower) {
+            'new task' { $scores.Cowork += 5; break }
+            'work in a project' { $scores.Cowork += 3; break }
+            'computer use' { $scores.Cowork += 4; break }
+            'code permissions' { $scores.Cowork += 4; break }
+            'outputs' { $scores.Cowork += 4; break }
+            'keep awake' { $scores.Cowork += 4; break }
+            'allow all browser actions' { $scores.Cowork += 4; break }
+            'sync tasks and refresh memory' { $scores.Cowork += 3; break }
+            'initialize productivity system' { $scores.Cowork += 3; break }
+            'dispatch' { $scores.Cowork += 1; break }
+            'scheduled' { $scores.Cowork += 1; break }
+            'new session' { $scores.Code += 5; break }
+            'routines' { $scores.Code += 4; break }
+            'overview' { $scores.Code += 3; break }
+            'models' { $scores.Code += 3; break }
+            'favorite model' { $scores.Code += 3; break }
+            'current streak' { $scores.Code += 3; break }
+            'longest streak' { $scores.Code += 3; break }
+            'peak hour' { $scores.Code += 3; break }
+            'total tokens' { $scores.Code += 3; break }
+            'active days' { $scores.Code += 3; break }
+            'messages' { $scores.Code += 2; break }
+            'sessions' { $scores.Code += 2; break }
+            'new chat' { $scores.Chat += 5; break }
+            'artifacts' { $scores.Chat += 4; break }
+            'learn' { $scores.Chat += 4; break }
+            'write' { $scores.Chat += 4; break }
+            'from calendar' { $scores.Chat += 4; break }
+            'from gmail' { $scores.Chat += 4; break }
+        }
+
+        if ($lower.StartsWith("what's up next") -or $lower.StartsWith('whats up next')) {
+            $scores.Code += 5
+        }
+
+        if ($lower.StartsWith("let's knock something off your list") -or $lower.StartsWith('lets knock something off your list')) {
+            $scores.Cowork += 6
+        }
+
+        if ($lower.StartsWith('get to work with productivity')) {
+            $scores.Cowork += 3
+        }
+
+        if ($lower.StartsWith('back at it')) {
+            $scores.Chat += 4
+        }
+
+        if ($lower -like 'dispatch background conversation*' -or $lower -like 'dispatch to claude and check in*' -or $lower -like 'files claude shares will appear here*') {
+            $dispatchHit = $true
+        }
+
+        if ($lower -eq 'adaptive thinking') {
+            $state.adaptiveSeen = $true
+            if (-not $state.adaptive) { $state.adaptive = $true }
+        }
+
+        if ($lower -eq 'extended thinking') {
+            $state.extendedSeen = $true
+            if (-not $state.extended) { $state.extended = $true }
+        }
+
+        $parsedModel = Parse-DesktopModel $name
+        if ($parsedModel) {
+            if (-not $state.model) {
+                $state.model = $parsedModel.model
+            }
+            if ($parsedModel.adaptive) {
+                $state.adaptive = $true
+            }
+            if ($parsedModel.extended) {
+                $state.extended = $true
+            }
+        }
+    }
+
+    $rankedModes = @(
+        @{ Mode = 'Cowork'; Score = [int]$scores.Cowork },
+        @{ Mode = 'Code'; Score = [int]$scores.Code },
+        @{ Mode = 'Chat'; Score = [int]$scores.Chat }
+    ) | Sort-Object { $_.Score } -Descending
+
+    if ($rankedModes[0].Score -gt 0) {
+        if ($rankedModes.Count -gt 1 -and $rankedModes[0].Score -eq $rankedModes[1].Score -and $fallbackMode) {
+            $state.mode = $fallbackMode
+        } else {
+            $state.mode = $rankedModes[0].Mode
+        }
+    }
+
+    if ($dispatchHit -and $state.mode -eq 'Cowork') {
+        $state.submode = 'Dispatch'
+    }
+
+    return $state
+}
 
 while ($true) {
     $client = ""
     $mode = ""
+    $submode = ""
     $model = ""
+    $effort = ""
+    $adaptive = $false
+    $extended = $false
+    $adaptiveSeen = $false
+    $extendedSeen = $false
 
     $allClaude = @(Get-Process -Name 'Claude' -ErrorAction SilentlyContinue)
     $desktopFound = $false
@@ -281,6 +467,14 @@ while ($true) {
 
     if ($desktopFound) {
         $client = "desktop"
+        $fallbackMode = ""
+
+        try {
+            if (Test-Path $desktopConfigPath) {
+                $desktopConfig = Get-Content $desktopConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                $fallbackMode = Convert-DesktopSidebarMode $desktopConfig.preferences.sidebarMode
+            }
+        } catch {}
 
         try {
             $w = [System.Windows.Automation.AutomationElement]::RootElement.FindFirst(
@@ -289,27 +483,116 @@ while ($true) {
                     [System.Windows.Automation.AutomationElement]::NameProperty, "Claude")))
 
             if ($w) {
-                $radioCondition = New-Object System.Windows.Automation.PropertyCondition(
-                    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-                    [System.Windows.Automation.ControlType]::RadioButton)
-                $radios = $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, $radioCondition)
-                foreach ($r in $radios) {
-                    $n = $r.Current.Name
-                    if ($n -eq "Chat" -or $n -eq "Cowork" -or $n -eq "Code") {
+                $all = $w.FindAll(
+                    [System.Windows.Automation.TreeScope]::Descendants,
+                    [System.Windows.Automation.Condition]::TrueCondition)
+                $names = New-Object 'System.Collections.Generic.List[string]'
+                $bestModelScore = -1
+                $bestModelAdaptive = $false
+                $bestModelExtended = $false
+                $bestModelEffort = ""
+                $toggleAdaptive = $null
+                $toggleExtended = $null
+                $toggleAdaptiveSeen = $false
+                $toggleExtendedSeen = $false
+
+                for ($i = 0; $i -lt $all.Count; $i++) {
+                    $el = $all.Item($i)
+                    $n = $el.Current.Name
+                    if (-not $n) { continue }
+                    $names.Add($n)
+
+                    $candidateModel = $null
+                    $candidateScore = -1
+                    $controlType = $el.Current.ControlType.ProgrammaticName
+                    $isOffscreen = $el.Current.IsOffscreen
+
+                    $parsedModel = Parse-DesktopModel $n
+                    if ($parsedModel) {
+                        $candidateModel = $parsedModel
+                        # Prefer the active-model pill: contains effort suffix (· Extra high)
+                        if ($parsedModel.effort -and -not $isOffscreen -and $controlType -eq "ControlType.Button") {
+                            $candidateScore = 6
+                        } elseif (-not $isOffscreen -and $controlType -eq "ControlType.Button") {
+                            $candidateScore = 4
+                        } elseif (-not $isOffscreen) {
+                            $candidateScore = 3
+                        } else {
+                            $candidateScore = 2
+                        }
+                    }
+
+                    if ($candidateScore -gt $bestModelScore) {
+                        $bestModelScore = $candidateScore
+                        $model = $candidateModel.model
+                        $bestModelAdaptive = $candidateModel.adaptive
+                        $bestModelExtended = $candidateModel.extended
+                        $bestModelEffort = $candidateModel.effort
+                    }
+
+                    $lowerName = $n.ToString().Trim().ToLowerInvariant()
+                    if ($lowerName -eq 'adaptive thinking' -or $lowerName -eq 'extended thinking') {
+                        $toggleOn = $null
                         try {
-                            $sp = $r.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
-                            if ($sp.Current.IsSelected) { $mode = $n }
+                            $tp = $el.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
+                            if ($tp) {
+                                $toggleOn = ($tp.Current.ToggleState -eq [System.Windows.Automation.ToggleState]::On)
+                            }
                         } catch {}
+                        if ($toggleOn -eq $null) {
+                            try {
+                                $parent = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($el)
+                                if ($parent) {
+                                    $ptp = $parent.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
+                                    if ($ptp) {
+                                        $toggleOn = ($ptp.Current.ToggleState -eq [System.Windows.Automation.ToggleState]::On)
+                                    }
+                                }
+                            } catch {}
+                        }
+                        if ($toggleOn -eq $null) {
+                            try {
+                                $kids = $el.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
+                                for ($j = 0; $j -lt $kids.Count; $j++) {
+                                    $ktp = $null
+                                    try { $ktp = $kids.Item($j).GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern) } catch {}
+                                    if ($ktp) {
+                                        $toggleOn = ($ktp.Current.ToggleState -eq [System.Windows.Automation.ToggleState]::On)
+                                        break
+                                    }
+                                }
+                            } catch {}
+                        }
+                        if ($lowerName -eq 'adaptive thinking') {
+                            $toggleAdaptiveSeen = $true
+                            if ($toggleOn -ne $null) { $toggleAdaptive = $toggleOn }
+                        } else {
+                            $toggleExtendedSeen = $true
+                            if ($toggleOn -ne $null) { $toggleExtended = $toggleOn }
+                        }
                     }
                 }
 
-                $btnCondition = New-Object System.Windows.Automation.PropertyCondition(
-                    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-                    [System.Windows.Automation.ControlType]::Button)
-                $buttons = $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, $btnCondition)
-                foreach ($b in $buttons) {
-                    $n = $b.Current.Name
-                    if ($n -match "^(Opus|Sonnet|Haiku)") { $model = $n }
+                $uiState = Get-DesktopUiState $names $fallbackMode
+                $mode = $uiState.mode
+                $submode = $uiState.submode
+                # Prefer actual toggle state from UIA over label presence
+                if ($toggleAdaptive -ne $null) {
+                    $adaptive = [bool]$toggleAdaptive
+                } else {
+                    $adaptive = $uiState.adaptive -or $bestModelAdaptive
+                }
+                if ($toggleExtended -ne $null) {
+                    $extended = [bool]$toggleExtended
+                } else {
+                    $extended = $uiState.extended -or $bestModelExtended
+                }
+                $adaptiveSeen = $uiState.adaptiveSeen -or $toggleAdaptiveSeen
+                $extendedSeen = $uiState.extendedSeen -or $toggleExtendedSeen
+                $effort = $bestModelEffort
+
+                if (-not $model -and $uiState.model) {
+                    $model = $uiState.model
                 }
             }
         } catch {}
@@ -319,8 +602,14 @@ while ($true) {
 
     $clientSafe = $client -replace '"', ''
     $modeSafe = $mode -replace '"', ''
+    $submodeSafe = $submode -replace '"', ''
     $modelSafe = $model -replace '"', ''
-    $json = "{""client"":""" + $clientSafe + """,""mode"":""" + $modeSafe + """,""model"":""" + $modelSafe + """,""codeInstances"":" + $codeCount + "}"
+    $effortSafe = $effort -replace '"', ''
+    $adaptiveSafe = if ($adaptive) { "true" } else { "false" }
+    $extendedSafe = if ($extended) { "true" } else { "false" }
+    $adaptiveSeenSafe = if ($adaptiveSeen) { "true" } else { "false" }
+    $extendedSeenSafe = if ($extendedSeen) { "true" } else { "false" }
+    $json = "{""client"":""" + $clientSafe + """,""mode"":""" + $modeSafe + """,""submode"":""" + $submodeSafe + """,""model"":""" + $modelSafe + """,""effort"":""" + $effortSafe + """,""adaptive"":" + $adaptiveSafe + ",""extended"":" + $extendedSafe + ",""adaptiveSeen"":" + $adaptiveSeenSafe + ",""extendedSeen"":" + $extendedSeenSafe + ",""codeInstances"":" + $codeCount + "}"
     [Console]::Out.WriteLine($json)
     [Console]::Out.Flush()
     Start-Sleep -Milliseconds $intervalMs
@@ -409,23 +698,42 @@ done
         try {
           const data = JSON.parse(trimmed);
           watcherLastUpdate = Date.now();
+          const prevModel = watcherState.model;
+          const prevMode = watcherState.mode;
           watcherState.client = data.client || null;
           watcherState.mode = data.mode || null;
+          watcherState.submode = data.submode || null;
           watcherState.codeInstances = data.codeInstances || 0;
+          watcherState.effort = data.effort || null;
 
-          if (data.model) {
-            watcherState.model = data.model;
-            watcherState.extended = /extended/i.test(data.model);
-          } else {
-            watcherState.model = null;
-            watcherState.extended = false;
+          const nextModel = data.model || null;
+          const modelChanged = nextModel !== prevModel;
+          const modeChanged = watcherState.mode !== prevMode;
+          watcherState.model = nextModel;
+
+          // Preserve adaptive/extended across ticks when the thinking toggles
+          // aren't visible in the UI (e.g. model picker closed). Reset when
+          // mode/model changes or the picker exposes a contradicting state.
+          if (data.adaptiveSeen || modelChanged || modeChanged) {
+            watcherState.adaptive = !!data.adaptive;
+          }
+          if (data.extendedSeen || modelChanged || modeChanged) {
+            watcherState.extended = !!data.extended;
           }
         } catch {}
       }
     });
 
     watcherProcess.on('exit', (code) => {
-      watcherState = { client: null, mode: null, model: null, extended: false, codeInstances: 0 };
+      watcherState = {
+        client: null,
+        mode: null,
+        submode: null,
+        model: null,
+        adaptive: false,
+        extended: false,
+        codeInstances: 0,
+      };
       watcherLastUpdate = 0;
       watcherRestarts++;
       if (watcherRestarts > MAX_WATCHER_RESTARTS) {
@@ -457,12 +765,13 @@ done
   function detectDesktopInfo() {
     return {
       mode: watcherState.mode,
+      submode: watcherState.submode,
       model: watcherState.model,
+      effort: watcherState.effort,
+      adaptive: watcherState.adaptive,
       extended: watcherState.extended,
     };
   }
-
-  const DESKTOP_MODE_MAP = { Chat: 'Chat', Cowork: 'Cowork', Code: 'Code' };
 
   // --- Detection: API provider (with TTL cache) ---
 
@@ -470,19 +779,38 @@ done
   let providerCachedAt = 0;
   const PROVIDER_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
+  function readSettingsEnv() {
+    try {
+      const settingsPath = path.join(CLAUDE_DIR, 'settings.json');
+      if (fs.existsSync(settingsPath)) {
+        const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+        return settings && typeof settings.env === 'object' ? settings.env : {};
+      }
+    } catch {}
+    return {};
+  }
+
+  function truthy(v) {
+    return v === '1' || v === 'true' || v === true;
+  }
+
   function detectProvider() {
     if (cachedProvider && (Date.now() - providerCachedAt) < PROVIDER_CACHE_TTL) {
       return cachedProvider;
     }
 
-    let result = 'Anthropic';
+    let result = 'Unknown';
+    const settingsEnv = readSettingsEnv();
+    const lookup = (key) => process.env[key] ?? settingsEnv[key];
 
-    if (process.env.CLAUDE_CODE_USE_BEDROCK === '1' || process.env.CLAUDE_CODE_USE_BEDROCK === 'true') {
+    if (truthy(lookup('CLAUDE_CODE_USE_BEDROCK'))) {
       result = 'Amazon Bedrock';
-    } else if (process.env.CLAUDE_CODE_USE_VERTEX === '1' || process.env.CLAUDE_CODE_USE_VERTEX === 'true') {
-      result = 'Google Cloud Vertex';
-    } else if (process.env.CLAUDE_CODE_USE_FOUNDRY === '1' || process.env.CLAUDE_CODE_USE_FOUNDRY === 'true') {
+    } else if (truthy(lookup('CLAUDE_CODE_USE_VERTEX'))) {
+      result = 'Google GCP Vertex';
+    } else if (truthy(lookup('CLAUDE_CODE_USE_FOUNDRY'))) {
       result = 'Microsoft Foundry';
+    } else if (lookup('ANTHROPIC_API_KEY') || lookup('CLAUDE_API_KEY')) {
+      result = 'Anthropic API';
     } else {
       try {
         const configPath = path.join(CLAUDE_DIR, 'config.json');
@@ -494,12 +822,12 @@ done
         log('warn', 'Provider detection (config):', e.message);
       }
 
-      if (result === 'Anthropic') {
+      if (result === 'Unknown') {
         try {
           const credsPath = path.join(CLAUDE_DIR, '.credentials.json');
           if (fs.existsSync(credsPath)) {
             const raw = fs.readFileSync(credsPath, 'utf8');
-            if (raw.includes('"claudeAiOauth"')) result = 'Claude.ai';
+            if (raw.includes('"claudeAiOauth"')) result = 'Claude Account';
           }
         } catch (e) {
           log('warn', 'Provider detection (creds):', e.message);
@@ -514,26 +842,57 @@ done
 
   // --- Detection: model ---
 
+  const CODE_EFFORT_MAP = {
+    low: 'Low',
+    medium: 'Medium',
+    high: 'High',
+    xhigh: 'Extra high',
+    extrahigh: 'Extra high',
+    'extra high': 'Extra high',
+    max: 'Max',
+  };
+
+  function detectCodeEffort() {
+    try {
+      const settingsPath = path.join(CLAUDE_DIR, 'settings.json');
+      if (fs.existsSync(settingsPath)) {
+        const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+        const raw = (settings.effortLevel || '').toString().toLowerCase().trim();
+        if (raw) return CODE_EFFORT_MAP[raw] || null;
+      }
+    } catch {}
+    return null;
+  }
+
+  function appendCodeEffort(model) {
+    if (!model) return model;
+    const effort = detectCodeEffort();
+    if (!effort) return model;
+    if (new RegExp(`\\b${effort}\\b`, 'i').test(model)) return model;
+    return `${model} \u00b7 ${effort}`;
+  }
+
   function detectModel(clientType, sessionFile) {
     if (clientType === 'desktop') {
       const info = detectDesktopInfo();
       if (info.model) {
-        const clean = info.model.replace(/\s*Extended\s*/i, '').trim();
-        return `Claude ${clean}`;
+        return `Claude ${info.model}`;
       }
     }
+
+    let base = null;
 
     try {
       const settingsPath = path.join(CLAUDE_DIR, 'settings.json');
       if (fs.existsSync(settingsPath)) {
         const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-        if (typeof settings.model === 'string') return formatModelName(settings.model);
+        if (typeof settings.model === 'string') base = formatModelName(settings.model);
       }
     } catch (e) {
       log('warn', 'Model detection (settings):', e.message);
     }
 
-    if (sessionFile) {
+    if (!base && sessionFile) {
       try {
         const tail = readFileTail(sessionFile, MAX_JSONL_SCAN_BYTES);
         const lines = tail.split('\n');
@@ -541,16 +900,18 @@ done
           try {
             const entry = JSON.parse(lines[i]);
             if (entry.type === 'assistant' && entry.message?.model) {
-              return formatModelName(entry.message.model);
+              base = formatModelName(entry.message.model);
+              break;
             }
           } catch {}
         }
       } catch {}
     }
 
-    if (process.env.CLAUDE_MODEL) return formatModelName(process.env.CLAUDE_MODEL);
-    if (process.env.ANTHROPIC_MODEL) return formatModelName(process.env.ANTHROPIC_MODEL);
-    return null;
+    if (!base && process.env.CLAUDE_MODEL) base = formatModelName(process.env.CLAUDE_MODEL);
+    if (!base && process.env.ANTHROPIC_MODEL) base = formatModelName(process.env.ANTHROPIC_MODEL);
+
+    return base;
   }
 
   // --- Detection: project name ---
@@ -634,25 +995,30 @@ done
 
   function buildActivity(clientType, sessionStats, projectName, isThinking, model) {
     const desktopInfo = clientType === 'desktop' ? detectDesktopInfo() : null;
-    const desktopModeLabel = desktopInfo?.mode ? DESKTOP_MODE_MAP[desktopInfo.mode] : null;
+    const desktopModeLabel = desktopInfo?.mode
+      ? formatDesktopModeLabel(desktopInfo.mode, desktopInfo.submode)
+      : null;
+    const codePresenceLabels = getCodePresenceLabels();
 
-    if (clientType === 'desktop' && desktopInfo?.extended && model && !model.includes('Extended')) {
-      model = model + ' Extended';
+    if (clientType === 'desktop') {
+      model = formatDesktopModelLabel(model, {
+        adaptive: desktopInfo?.adaptive,
+        extended: desktopInfo?.extended,
+        effort: desktopInfo?.mode === 'Code' ? desktopInfo?.effort : null,
+      });
     }
 
     const logoImage = getLogoImage();
     const provider = detectProvider();
-    const instanceLabel = clientType === 'code' && watcherState.codeInstances > 1
-      ? ` [${watcherState.codeInstances}]` : '';
 
     const configs = {
       code: {
-        details: `Claude Code${instanceLabel}`,
+        details: codePresenceLabels.details,
         state: `${model || 'Claude'} | ${provider}`,
         largeImageKey: logoImage,
         largeImageText: model || 'Claude Code',
         smallImageKey: 'terminal_icon',
-        smallImageText: `Claude Code CLI${instanceLabel}`,
+        smallImageText: codePresenceLabels.smallImageText,
         buttons: [{ label: 'Claude', url: 'https://claude.ai' }, { label: 'GitHub', url: 'https://github.com/StealthyLabsHQ/claude-rpc' }],
       },
       desktop: {
@@ -848,7 +1214,7 @@ done
       const payload = JSON.stringify({
         content: null,
         embeds: [{
-          title: `Claude RPC - ${event}`,
+          title: `${TRAY_APP_NAME} - ${event}`,
           description: sanitizeString(details || '', 256),
           color: event === 'Session Started' ? 0x6C63FF : event === 'Away' ? 0xFFAA00 : 0x999999,
           timestamp: new Date().toISOString(),
@@ -868,7 +1234,7 @@ done
 
   // --- Main loop ---
 
-  const UPDATE_INTERVAL = 2_000;
+  const UPDATE_INTERVAL = 1_000;
 
   let currentClient = null;
   let cachedSessionStart = null;
@@ -877,12 +1243,6 @@ done
   let cachedSessionStats = null;
   let cachedModel = null;
   let lastActivityHash = null;
-  let lastActivityTime = 0;
-  const MIN_ACTIVITY_INTERVAL = 60_000;
-
-  function hashActivity(obj) {
-    return JSON.stringify(obj);
-  }
 
   // Start watchers
   startWatcher();
@@ -901,6 +1261,7 @@ done
     reconnectAttempts++;
     log('info', `Discord disconnected, reconnecting in ${Math.round(d / 1000)}s`);
     console.log(`\nDiscord disconnected - reconnecting in ${Math.round(d / 1000)}s...`);
+    updateTrayStatus(currentClient || detectClient());
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       client = new Client({ clientId: CLIENT_ID });
@@ -912,9 +1273,56 @@ done
   // --- Status file for tray.js ---
 
   const STATUS_FILE = path.join(RPC_DIR, 'status.txt');
+  let lastStatusPayload = '';
+  let lastConsoleStatusLine = '';
 
-  function writeStatus(text) {
-    try { fs.writeFileSync(STATUS_FILE, text, 'utf8'); } catch {}
+  function writeStatus(status) {
+    try { fs.writeFileSync(STATUS_FILE, JSON.stringify(status), 'utf8'); } catch {}
+  }
+
+  function updateTrayStatus(forceClientType) {
+    const cl = forceClientType === undefined ? detectClient() : forceClientType;
+    const di = detectDesktopInfo();
+    let model = cl === 'desktop' ? detectModel(cl, cachedSessionFile) : cachedModel;
+    if (cl === 'desktop') {
+      model = formatDesktopModelLabel(model, {
+        adaptive: di?.adaptive,
+        extended: di?.extended,
+        effort: di?.mode === 'Code' ? di?.effort : null,
+      });
+    }
+
+    const status = buildTrayStatus({
+      clientType: cl,
+      clientMode: di?.mode || null,
+      clientSubmode: di?.submode || null,
+      model,
+      provider: detectProvider(),
+      projectName: cachedProjectName,
+      codeInstances: watcherState.codeInstances,
+      discordConnected: rpcConnected,
+      reconnecting: !!reconnectTimer,
+      dnd: !!config.dnd,
+    });
+    const consoleLine = buildConsoleStatusLine({
+      clientType: cl,
+      clientMode: di?.mode || null,
+      clientSubmode: di?.submode || null,
+      model,
+      projectName: cachedProjectName,
+      codeInstances: watcherState.codeInstances,
+      dnd: !!config.dnd,
+    });
+
+    const payload = JSON.stringify(status);
+    if (payload !== lastStatusPayload) {
+      lastStatusPayload = payload;
+      writeStatus(status);
+    }
+    if (consoleLine !== lastConsoleStatusLine) {
+      lastConsoleStatusLine = consoleLine;
+      process.stdout.write(`\r\x1b[2K${consoleLine}`);
+    }
   }
 
   function setupClient() {
@@ -924,29 +1332,7 @@ done
       log('info', 'Discord Rich Presence connected');
       console.log('Rich Presence ready');
       console.log(`Provider: ${detectProvider()}`);
-
-      const clientDisplayName = { code: 'Claude Code', desktop: 'Claude Desktop' };
-      let lastStatusLine = '';
-
-      function updateStatusLine() {
-        const di = detectDesktopInfo();
-        const cl = detectClient();
-        let model = cl === 'desktop' ? detectModel(cl, cachedSessionFile) : cachedModel;
-        if (cl === 'desktop' && di?.extended && model && !model.includes('Extended')) {
-          model += ' Extended';
-        }
-        const modePart = cl === 'desktop' && di?.mode ? ` \u2022 ${DESKTOP_MODE_MAP[di.mode] || di.mode}` : '';
-        const projectPart = cl === 'code' && cachedProjectName ? ` \u2022 ${cachedProjectName}` : '';
-        const instancePart = cl === 'code' && watcherState.codeInstances > 1 ? ` [${watcherState.codeInstances}]` : '';
-        const dndPart = config.dnd ? ' [DND]' : '';
-        const line = `${clientDisplayName[cl] || 'Idle'}${modePart}${projectPart}${instancePart} \u2022 ${model || 'auto-detect'}${dndPart}`;
-        if (line !== lastStatusLine) {
-          lastStatusLine = line;
-          process.stdout.write(`\r\x1b[2K${line}`);
-          writeStatus(line);
-        }
-      }
-      updateStatusLine();
+      updateTrayStatus();
       currentClient = detectClient();
 
       function update() {
@@ -955,15 +1341,14 @@ done
           if (lastActivityHash !== 'dnd') {
             client.user.clearActivity();
             lastActivityHash = 'dnd';
-            process.stdout.write('\r\x1b[2KDo Not Disturb');
-            writeStatus('Do Not Disturb');
             log('info', 'DND mode active');
           }
+          updateTrayStatus(detectClient());
           return;
         }
 
         const detected = detectClient();
-        updateStatusLine();
+        updateTrayStatus(detected);
 
         if (detected) {
           if (detected !== currentClient) {
@@ -999,9 +1384,12 @@ done
           }
 
           if (detected === 'desktop' && watcherState.model) {
-            const clean = watcherState.model.replace(/\s*Extended\s*/i, '').trim();
-            cachedModel = clean;
-            if (watcherState.extended) cachedModel += ' Extended';
+            const clean = watcherState.model.replace(/\s*(Adaptive|Extended)\s*/ig, ' ').trim();
+            cachedModel = formatDesktopModelLabel(clean, {
+              adaptive: watcherState.adaptive,
+              extended: watcherState.extended,
+              effort: watcherState.mode === 'Code' ? watcherState.effort : null,
+            });
           }
 
           const idle = detected === 'desktop' ? false : isSessionIdle(cachedSessionFile);
@@ -1012,7 +1400,8 @@ done
             sendWebhook('Away', `${cachedModel || 'Claude'} idle`);
           }
 
-          const a = buildActivity(activityType, idle ? null : cachedSessionStats, cachedProjectName, isThinking, cachedModel);
+          const displayModel = (!idle && detected === 'code') ? appendCodeEffort(cachedModel) : cachedModel;
+          const a = buildActivity(activityType, idle ? null : cachedSessionStats, cachedProjectName, isThinking, displayModel);
           const activityPayload = {
             type: 3,
             name: 'Claude AI',
@@ -1028,27 +1417,14 @@ done
             buttons: a.buttons,
           };
 
-          const criticalPayload = {
-            client: activityType,
-            model: cachedModel,
-            project: cachedProjectName,
-            mode: watcherState.mode,
-            startTimestamp: activityPayload.startTimestamp,
-          };
-          const criticalHash = hashActivity(criticalPayload);
-          const fullHash = hashActivity({ ...activityPayload, details: a.details.replace(' (thinking...)', '') });
-          const now = Date.now();
-          const isCriticalChange = criticalHash !== lastActivityHash;
-          const isTimedUpdate = fullHash !== lastActivityHash && (now - lastActivityTime) >= MIN_ACTIVITY_INTERVAL;
-
-          if (isCriticalChange || isTimedUpdate) {
-            lastActivityHash = isCriticalChange ? criticalHash : fullHash;
-            lastActivityTime = now;
+          const nextActivityHash = buildPresenceChangeKey(activityPayload);
+          if (nextActivityHash !== lastActivityHash) {
+            lastActivityHash = nextActivityHash;
             client.user.setActivity(activityPayload);
           }
         } else {
           if (currentClient !== null) {
-            updateStatusLine();
+            updateTrayStatus(detected);
             sendWebhook('Session Ended', `${cachedModel || 'Claude'} session ended`);
             currentClient = null;
             cachedSessionStart = null;
@@ -1071,10 +1447,9 @@ done
             buttons: a.buttons,
           };
 
-          const idleHash = hashActivity({ client: 'idle' });
+          const idleHash = buildPresenceChangeKey(activityPayload);
           if (idleHash !== lastActivityHash) {
             lastActivityHash = idleHash;
-            lastActivityTime = Date.now();
             client.user.setActivity(activityPayload);
           }
         }
@@ -1087,11 +1462,15 @@ done
     client.on('disconnected', () => {
       rpcConnected = false;
       lastActivityHash = null;
+      updateTrayStatus(currentClient || detectClient());
       scheduleReconnect();
     });
 
     client.on('error', () => {
-      if (!rpcConnected) scheduleReconnect();
+      if (!rpcConnected) {
+        updateTrayStatus(currentClient || detectClient());
+        scheduleReconnect();
+      }
     });
   }
 
@@ -1100,6 +1479,7 @@ done
     setupClient();
     client.login().catch(() => scheduleReconnect(5000));
   }, WATCHER_INTERVAL_MS + 200);
+  updateTrayStatus();
 
   // Cleanup
   function cleanup() {
@@ -1136,6 +1516,56 @@ function readFileTail(filePath, bytes) {
 }
 
 const MODELS_1M_DEFAULT = new Set(['opus-4-6', 'opus-4-5']);
+const DESKTOP_MODE_MAP = { Chat: 'Chat', Cowork: 'Cowork', Code: 'Code' };
+const DESKTOP_SIDEBAR_MODE_MAP = {
+  chat: 'Chat',
+  cowork: 'Cowork',
+  code: 'Code',
+  epitaxy: 'Cowork',
+};
+const DESKTOP_UI_SCORE_CUES = {
+  Cowork: [
+    [/^new task$/, 5],
+    [/^work in a project$/, 3],
+    [/^computer use$/, 4],
+    [/^code permissions$/, 4],
+    [/^outputs$/, 4],
+    [/^keep awake$/, 4],
+    [/^allow all browser actions$/, 4],
+    [/^sync tasks and refresh memory$/, 3],
+    [/^initialize productivity system$/, 3],
+    [/^dispatch$/, 1],
+    [/^scheduled$/, 1],
+    [/^let's knock something off your list/, 6],
+    [/^lets knock something off your list/, 6],
+    [/^get to work with productivity/, 3],
+  ],
+  Code: [
+    [/^new session$/, 5],
+    [/^routines$/, 4],
+    [/^what's up next/, 5],
+    [/^whats up next/, 5],
+    [/^overview$/, 3],
+    [/^models$/, 3],
+    [/^favorite model$/, 3],
+    [/^current streak$/, 3],
+    [/^longest streak$/, 3],
+    [/^peak hour$/, 3],
+    [/^total tokens$/, 3],
+    [/^active days$/, 3],
+    [/^messages$/, 2],
+    [/^sessions$/, 2],
+  ],
+  Chat: [
+    [/^new chat$/, 5],
+    [/^artifacts$/, 4],
+    [/^learn$/, 4],
+    [/^write$/, 4],
+    [/^from calendar$/, 4],
+    [/^from gmail$/, 4],
+    [/^back at it/, 4],
+  ],
+};
 
 function formatModelName(modelId) {
   if (!modelId || typeof modelId !== 'string') return null;
@@ -1163,6 +1593,258 @@ function formatModelName(modelId) {
   return sanitizeString(modelId);
 }
 
+function getCodePresenceLabels() {
+  return {
+    details: 'Claude Code',
+    smallImageText: 'Claude Code CLI',
+  };
+}
+
+function mapDesktopSidebarMode(rawMode) {
+  const normalized = sanitizeString(rawMode || '', 32).toLowerCase();
+  return DESKTOP_SIDEBAR_MODE_MAP[normalized] || null;
+}
+
+function normalizeDesktopUiLabel(name) {
+  return sanitizeString(name || '', 128).toLowerCase();
+}
+
+function parseDesktopModelCandidate(rawValue) {
+  const cleanValue = sanitizeString(rawValue || '', 64);
+  if (!cleanValue) return null;
+
+  let match = cleanValue.match(/^(?:Claude\s+)?(Opus|Sonnet|Haiku)\s+(\d+\.\d+)(?:\s+(1M))?(?:\s+(Adaptive|Extended))?(?:\s+.*)?$/i);
+  if (match) {
+    const family = match[1][0].toUpperCase() + match[1].slice(1).toLowerCase();
+    const ctx = match[3] || '';
+    const suffix = match[4] || '';
+    return {
+      model: ctx ? `${family} ${match[2]} ${ctx}` : `${family} ${match[2]}`,
+      adaptive: /adaptive/i.test(suffix),
+      extended: /extended/i.test(suffix),
+    };
+  }
+
+  match = cleanValue.match(/^claude-(opus|sonnet|haiku)-(\d+)-(\d+)(?:\[[^\]]+\])?$/i);
+  if (match) {
+    const family = match[1][0].toUpperCase() + match[1].slice(1).toLowerCase();
+    return {
+      model: `${family} ${match[2]}.${match[3]}`,
+      adaptive: false,
+      extended: false,
+    };
+  }
+
+  return null;
+}
+
+function inferDesktopUiState(names, fallbackMode = null) {
+  const state = {
+    mode: mapDesktopSidebarMode(fallbackMode) || null,
+    submode: null,
+    model: null,
+    adaptive: false,
+    extended: false,
+  };
+
+  if (!Array.isArray(names) || names.length === 0) {
+    return state;
+  }
+
+  const scores = { Cowork: 0, Code: 0, Chat: 0 };
+  let dispatchHit = false;
+
+  for (const rawName of names) {
+    const normalized = normalizeDesktopUiLabel(rawName);
+    if (!normalized) continue;
+
+    for (const [mode, cues] of Object.entries(DESKTOP_UI_SCORE_CUES)) {
+      for (const [pattern, weight] of cues) {
+        if (pattern.test(normalized)) {
+          scores[mode] += weight;
+        }
+      }
+    }
+
+    if (
+      normalized.startsWith('dispatch background conversation') ||
+      normalized.startsWith('dispatch to claude and check in') ||
+      normalized.startsWith('files claude shares will appear here')
+    ) {
+      dispatchHit = true;
+    }
+
+    if (normalized === 'adaptive thinking') {
+      state.adaptive = true;
+    }
+
+    if (normalized === 'extended thinking') {
+      state.extended = true;
+    }
+
+    const modelCandidate = parseDesktopModelCandidate(rawName);
+    if (modelCandidate) {
+      if (!state.model) {
+        state.model = modelCandidate.model;
+      }
+      state.adaptive = state.adaptive || modelCandidate.adaptive;
+      state.extended = state.extended || modelCandidate.extended;
+    }
+  }
+
+  const rankedModes = Object.entries(scores).sort((a, b) => b[1] - a[1]);
+  const [bestMode, bestScore] = rankedModes[0] || [null, 0];
+  const [, secondScore] = rankedModes[1] || [null, 0];
+
+  if (bestScore > 0) {
+    state.mode = bestScore === secondScore
+      ? (mapDesktopSidebarMode(fallbackMode) || state.mode)
+      : bestMode;
+  }
+
+  if (dispatchHit && state.mode === 'Cowork') {
+    state.submode = 'Dispatch';
+  }
+
+  return state;
+}
+
+function formatDesktopModeLabel(mode, submode = null) {
+  const baseMode = DESKTOP_MODE_MAP[mode] || sanitizeString(mode || '') || 'Chat';
+  const cleanSubmode = sanitizeString(submode || '', 32);
+  return cleanSubmode ? `${baseMode} - ${cleanSubmode}` : baseMode;
+}
+
+function formatDesktopModelLabel(model, {
+  adaptive = false,
+  extended = false,
+  effort = null,
+} = {}) {
+  let cleanModel = sanitizeString(model || '') || null;
+  if (!cleanModel) return null;
+
+  const hasAdaptive = /\bAdaptive\b/i.test(cleanModel);
+  const hasExtended = /\bExtended\b/i.test(cleanModel);
+
+  if (!hasAdaptive && !hasExtended) {
+    if (adaptive) cleanModel = `${cleanModel} Adaptive`;
+    else if (extended) cleanModel = `${cleanModel} Extended`;
+  }
+
+  const cleanEffort = sanitizeString(effort || '', 32);
+  if (cleanEffort && !new RegExp(`\\b${cleanEffort}\\b`, 'i').test(cleanModel)) {
+    cleanModel = `${cleanModel} \u00b7 ${cleanEffort}`;
+  }
+
+  return cleanModel;
+}
+
+function buildPresenceChangeKey(activityPayload = {}) {
+  const assets = activityPayload.assets || {};
+  const buttons = Array.isArray(activityPayload.buttons) ? activityPayload.buttons : [];
+
+  return JSON.stringify({
+    type: activityPayload.type || null,
+    name: typeof activityPayload.name === 'string' ? activityPayload.name.trim().slice(0, 64) : null,
+    details: typeof activityPayload.details === 'string'
+      ? activityPayload.details.replace(/\s+\(thinking\.\.\.\)$/i, '').trim().slice(0, 128)
+      : null,
+    state: typeof activityPayload.state === 'string' ? activityPayload.state.trim().slice(0, 128) : null,
+    startTimestamp: Number.isFinite(activityPayload.startTimestamp) ? activityPayload.startTimestamp : null,
+    assets: {
+      largeImage: typeof assets.largeImage === 'string' ? assets.largeImage.slice(0, 256) : null,
+      largeText: typeof assets.largeText === 'string' ? assets.largeText.trim().slice(0, 128) : null,
+      smallImage: typeof assets.smallImage === 'string' ? assets.smallImage.slice(0, 256) : null,
+      smallText: typeof assets.smallText === 'string' ? assets.smallText.trim().slice(0, 128) : null,
+    },
+    buttons: buttons.map((button) => ({
+      label: typeof button?.label === 'string' ? button.label.trim().slice(0, 64) : null,
+      url: typeof button?.url === 'string' ? button.url.slice(0, 256) : null,
+    })),
+  });
+}
+
+function buildConsoleStatusLine({
+  clientType = null,
+  clientMode = null,
+  model = null,
+  projectName = null,
+  codeInstances = 0,
+  dnd = false,
+} = {}) {
+  let runtime = 'Idle';
+  if (clientType === 'desktop') {
+    runtime = `Claude Desktop${clientMode ? ` • ${DESKTOP_MODE_MAP[clientMode] || clientMode}` : ''}`;
+  } else if (clientType === 'code') {
+    const instanceSuffix = codeInstances > 1 ? ` [${codeInstances}]` : '';
+    const projectSuffix = projectName ? ` \u2022 ${projectName}` : '';
+    runtime = `Claude Code${instanceSuffix}${projectSuffix}`;
+  }
+
+  const dndTag = dnd ? ' [DND]' : '';
+  return `${runtime} • ${model || 'auto-detect'}${dndTag}`;
+}
+
+function buildTrayStatus() {
+  return {
+    version: 2,
+    summary: TRAY_APP_NAME,
+  };
+}
+
+// Keep tray UI intentionally minimal: title + provider/model/Discord only.
+function buildConsoleStatusLine({
+  clientType = null,
+  clientMode = null,
+  clientSubmode = null,
+  model = null,
+  projectName = null,
+  codeInstances = 0,
+  dnd = false,
+} = {}) {
+  let runtime = 'Idle';
+  if (clientType === 'desktop') {
+    runtime = `Claude Desktop${clientMode ? ` | ${formatDesktopModeLabel(clientMode, clientSubmode)}` : ''}`;
+  } else if (clientType === 'code') {
+    const instanceSuffix = codeInstances > 1 ? ` [${codeInstances}]` : '';
+    const projectSuffix = projectName ? ` | ${projectName}` : '';
+    runtime = `Claude Code${instanceSuffix}${projectSuffix}`;
+  }
+
+  const dndTag = dnd ? ' [DND]' : '';
+  return `${runtime} | ${model || 'auto-detect'}${dndTag}`;
+}
+
+function buildTrayStatus({
+  clientType = null,
+  clientMode = null,
+  clientSubmode = null,
+  model = null,
+  provider = null,
+  discordConnected = false,
+} = {}) {
+  let claudeLine;
+  if (!clientType) {
+    claudeLine = 'Claude: Off';
+  } else if (clientType === 'code') {
+    claudeLine = 'Claude: CLI (Code)';
+  } else {
+    const modeLabel = clientMode
+      ? (clientSubmode ? `${clientMode} - ${clientSubmode}` : clientMode)
+      : null;
+    claudeLine = modeLabel ? `Claude: Desktop (${modeLabel})` : 'Claude: Desktop';
+  }
+
+  return {
+    version: 4,
+    summary: TRAY_APP_NAME,
+    claudeLine,
+    modelLine: model || 'Auto-detect',
+    providerLine: `Provider: ${provider || 'Unknown'}`,
+    discordLine: `Discord: ${discordConnected ? 'Connected' : 'RPC disabled'}`,
+  };
+}
+
 function compareVersions(a, b) {
   const pa = a.split('.').map(Number);
   const pb = b.split('.').map(Number);
@@ -1181,4 +1863,20 @@ if (require.main === module) {
   start();
 }
 
-module.exports = { start, formatModelName, compareVersions, sanitizeString, loadConfig, saveConfig, DEFAULT_CONFIG, CONFIG_PATH };
+module.exports = {
+  start,
+  formatModelName,
+  inferDesktopUiState,
+  formatDesktopModeLabel,
+  formatDesktopModelLabel,
+  buildPresenceChangeKey,
+  compareVersions,
+  sanitizeString,
+  loadConfig,
+  saveConfig,
+  DEFAULT_CONFIG,
+  CONFIG_PATH,
+  buildTrayStatus,
+  getCodePresenceLabels,
+  TRAY_APP_NAME,
+};

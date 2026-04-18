@@ -1,7 +1,7 @@
 <img width="1538" height="173" alt="image" src="https://github.com/user-attachments/assets/ccd6d142-7fda-42f0-b461-a6756cdfa9a1" />
 <img width="3840" height="2160" alt="image" src="https://github.com/user-attachments/assets/b20718e5-8137-4fcd-b018-24fdb14056ed" />
 
-<h1 align="center">Claude RPC</h1>
+<h1 align="center">Claude Rich Presence</h1>
 
 <p align="center">
   Discord Rich Presence for Claude AI - displays real-time activity status on your Discord profile.
@@ -76,7 +76,7 @@ claude-rpc [options]
 
 ## Configuration
 
-Claude RPC uses a config file at `~/.claude-rpc/config.json`. Create it to customize behavior:
+Claude Rich Presence uses a config file at `~/.claude-rpc/config.json`. Create it to customize behavior:
 
 ```json
 {

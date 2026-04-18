@@ -2,7 +2,20 @@ import { describe, it, expect } from 'vitest';
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
-const { formatModelName, compareVersions, sanitizeString, loadConfig, DEFAULT_CONFIG } = require('../index');
+const {
+  formatModelName,
+  inferDesktopUiState,
+  formatDesktopModeLabel,
+  formatDesktopModelLabel,
+  buildPresenceChangeKey,
+  compareVersions,
+  sanitizeString,
+  loadConfig,
+  DEFAULT_CONFIG,
+  buildTrayStatus,
+  getCodePresenceLabels,
+  TRAY_APP_NAME,
+} = require('../index');
 
 // --- formatModelName ---
 
@@ -121,5 +134,158 @@ describe('config', () => {
     const cfg = loadConfig();
     expect(cfg.idleTimeoutMinutes).toBe(15);
     expect(cfg.dnd).toBe(false);
+  });
+});
+
+// --- Tray status ---
+
+describe('buildTrayStatus', () => {
+  it('uses the renamed app label for the tray', () => {
+    expect(TRAY_APP_NAME).toBe('Claude Rich Presence');
+  });
+
+  it('shows claude/model/provider/discord for desktop Code sessions', () => {
+    const status = buildTrayStatus({
+      clientType: 'desktop',
+      clientMode: 'Code',
+      model: 'Claude Sonnet 4.6',
+      provider: 'Anthropic API',
+      discordConnected: true,
+    });
+
+    expect(status.summary).toBe('Claude Rich Presence');
+    expect(status.claudeLine).toBe('Claude: Desktop (Code)');
+    expect(status.modelLine).toBe('Claude Sonnet 4.6');
+    expect(status.providerLine).toBe('Provider: Anthropic API');
+    expect(status.discordLine).toBe('Discord: Connected');
+  });
+
+  it('shows CLI label and RPC disabled when code client and Discord not connected', () => {
+    const status = buildTrayStatus({
+      clientType: 'code',
+      model: 'Claude Opus 4.6',
+      discordConnected: false,
+      provider: 'Claude Account',
+    });
+
+    expect(status.summary).toBe('Claude Rich Presence');
+    expect(status.claudeLine).toBe('Claude: CLI (Code)');
+    expect(status.modelLine).toBe('Claude Opus 4.6');
+    expect(status.providerLine).toBe('Provider: Claude Account');
+    expect(status.discordLine).toBe('Discord: RPC disabled');
+  });
+
+  it('falls back to Off/Auto-detect/Unknown when values are missing', () => {
+    const status = buildTrayStatus({});
+
+    expect(status.summary).toBe('Claude Rich Presence');
+    expect(status.claudeLine).toBe('Claude: Off');
+    expect(status.modelLine).toBe('Auto-detect');
+    expect(status.providerLine).toBe('Provider: Unknown');
+    expect(status.discordLine).toBe('Discord: RPC disabled');
+  });
+
+  it('includes submode in Desktop label for Cowork - Dispatch', () => {
+    const status = buildTrayStatus({
+      clientType: 'desktop',
+      clientMode: 'Cowork',
+      clientSubmode: 'Dispatch',
+    });
+
+    expect(status.claudeLine).toBe('Claude: Desktop (Cowork - Dispatch)');
+  });
+});
+
+// --- Discord RPC labels ---
+
+describe('getCodePresenceLabels', () => {
+  it('does not include the multi-instance count in RPC labels', () => {
+    const labels = getCodePresenceLabels(2);
+
+    expect(labels.details).toBe('Claude Code');
+    expect(labels.smallImageText).toBe('Claude Code CLI');
+    expect(labels.details).not.toContain('[2]');
+    expect(labels.smallImageText).not.toContain('[2]');
+  });
+});
+
+// --- Claude Desktop labels ---
+
+describe('formatDesktopModeLabel', () => {
+  it('includes the Cowork submode when Dispatch is active', () => {
+    expect(formatDesktopModeLabel('Cowork', 'Dispatch')).toBe('Cowork - Dispatch');
+  });
+
+  it('falls back to the base mode when no submode is present', () => {
+    expect(formatDesktopModeLabel('Chat')).toBe('Chat');
+  });
+});
+
+describe('formatDesktopModelLabel', () => {
+  it('adds Adaptive when adaptive thinking is enabled', () => {
+    expect(formatDesktopModelLabel('Claude Opus 4.7', { adaptive: true })).toBe('Claude Opus 4.7 Adaptive');
+  });
+
+  it('does not duplicate Adaptive when already present', () => {
+    expect(formatDesktopModelLabel('Claude Opus 4.7 Adaptive', { adaptive: true })).toBe('Claude Opus 4.7 Adaptive');
+  });
+});
+
+describe('inferDesktopUiState', () => {
+  it('detects Dispatch inside Cowork views', () => {
+    const state = inferDesktopUiState([
+      'New task',
+      'Computer use',
+      'Code permissions',
+      'Outputs',
+      'Dispatch background conversation',
+    ]);
+
+    expect(state.mode).toBe('Cowork');
+    expect(state.submode).toBe('Dispatch');
+  });
+
+  it('detects Code from the desktop dashboard controls', () => {
+    const state = inferDesktopUiState([
+      'New session',
+      'Routines',
+      "What's up next, Stealthy?",
+      'Overview',
+      'Favorite model',
+    ]);
+
+    expect(state.mode).toBe('Code');
+    expect(state.submode).toBeNull();
+  });
+
+  it('detects Chat and Adaptive from chat composer controls', () => {
+    const state = inferDesktopUiState([
+      'New chat',
+      'Artifacts',
+      'Learn',
+      'From Gmail',
+      'Opus 4.7 Adaptive',
+    ]);
+
+    expect(state.mode).toBe('Chat');
+    expect(state.model).toBe('Opus 4.7');
+    expect(state.adaptive).toBe(true);
+  });
+});
+
+describe('buildPresenceChangeKey', () => {
+  it('changes when the desktop submode changes', () => {
+    const cowork = buildPresenceChangeKey({
+      details: 'Claude Desktop (Cowork)',
+      state: 'Opus 4.7 | Anthropic API',
+      assets: { smallText: 'Claude Desktop - Cowork' },
+    });
+    const dispatch = buildPresenceChangeKey({
+      details: 'Claude Desktop (Cowork - Dispatch)',
+      state: 'Opus 4.7 | Anthropic API',
+      assets: { smallText: 'Claude Desktop - Cowork - Dispatch' },
+    });
+
+    expect(cowork).not.toBe(dispatch);
   });
 });

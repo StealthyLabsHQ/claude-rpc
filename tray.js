@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * tray.js - Claude RPC with system tray support
+ * tray.js - Claude Rich Presence with system tray support
  *
  * Entry points:
  *   npm start          → tray.js  (with system tray on Windows)
@@ -30,6 +30,7 @@ const NO_TRAY = args.includes('--no-tray') || !IS_WINDOWS;
 // --- Start the RPC engine ---
 
 const rpc = require('./index');
+const APP_NAME = rpc.TRAY_APP_NAME || 'Claude Rich Presence';
 const engine = rpc.start();
 
 if (NO_TRAY) {
@@ -103,6 +104,7 @@ function generateTrayScript(iconPath) {
   const statusFileSafe = STATUS_FILE.replace(/\\/g, '\\\\').replace(/'/g, "''");
   const configFileSafe = CONFIG_PATH.replace(/\\/g, '\\\\').replace(/'/g, "''");
   const iconPathSafe = iconPath.replace(/\\/g, '\\\\').replace(/'/g, "''");
+  const appNameSafe = APP_NAME.replace(/\\/g, '\\\\').replace(/'/g, "''");
 
   return `
 Add-Type -AssemblyName System.Windows.Forms
@@ -110,10 +112,11 @@ Add-Type -AssemblyName System.Drawing
 
 $statusFile = '${statusFileSafe}'
 $configFile = '${configFileSafe}'
+$appName = '${appNameSafe}'
 
 # Create NotifyIcon
 $notifyIcon = New-Object System.Windows.Forms.NotifyIcon
-$notifyIcon.Text = "Claude RPC"
+$notifyIcon.Text = $appName
 $notifyIcon.Visible = $true
 
 # Try to load icon
@@ -131,12 +134,18 @@ if ($iconPath -and (Test-Path $iconPath)) {
 # Context menu
 $contextMenu = New-Object System.Windows.Forms.ContextMenuStrip
 
-$titleItem = $contextMenu.Items.Add("Claude RPC")
+$titleItem = $contextMenu.Items.Add($appName)
 $titleItem.Enabled = $false
 $titleItem.Font = New-Object System.Drawing.Font($titleItem.Font, [System.Drawing.FontStyle]::Bold)
 
-$statusItem = $contextMenu.Items.Add("Starting...")
-$statusItem.Enabled = $false
+$providerItem = $contextMenu.Items.Add("Provider: Unknown")
+$providerItem.Enabled = $false
+
+$modelItem = $contextMenu.Items.Add("Model: Auto-detect")
+$modelItem.Enabled = $false
+
+$discordItem = $contextMenu.Items.Add("Discord: RPC disabled")
+$discordItem.Enabled = $false
 
 $contextMenu.Items.Add("-") | Out-Null
 
@@ -192,17 +201,19 @@ $bootItem.Add_Click({
     [Console]::Out.Flush()
 })
 
-# Timer to refresh status from file
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 3000
 $timer.Add_Tick({
     try {
         if (Test-Path $statusFile) {
-            $status = (Get-Content $statusFile -Raw -ErrorAction SilentlyContinue).Trim()
-            if ($status) {
-                $truncated = $status.Substring(0, [Math]::Min($status.Length, 63))
-                $notifyIcon.Text = "Claude RPC - " + $truncated
-                $statusItem.Text = $status
+            $raw = (Get-Content $statusFile -Raw -ErrorAction SilentlyContinue).Trim()
+            if ($raw) {
+                try {
+                    $status = $raw | ConvertFrom-Json -ErrorAction Stop
+                    if ($status.providerLine) { $providerItem.Text = [string]$status.providerLine }
+                    if ($status.modelLine)    { $modelItem.Text = [string]$status.modelLine }
+                    if ($status.discordLine)  { $discordItem.Text = [string]$status.discordLine }
+                } catch {}
             }
         }
     } catch {}

@@ -1,20 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[
-        # logo assets
-        ('logo/tray-icon.png',       'logo'),
-        ('logo/discord.png',         'logo'),
-        ('logo/anthropic-rpc.ico',   'logo'),
-        # esbuild bundle (replaces index.js + node_modules entirely)
-        ('build/bundle.js',          'runtime'),
-        # node.exe (~67 MB)
-        ('build/runtime/node.exe',   'runtime'),
-    ],
-    hiddenimports=[],
+    datas=[('build/staging/runtime', 'runtime'), ('build/staging/logo', 'logo')],
+    hiddenimports=['backports', 'backports.tarfile'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -22,7 +14,6 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
-
 pyz = PYZ(a.pure)
 
 exe = EXE(

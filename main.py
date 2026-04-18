@@ -1,6 +1,7 @@
-"""Claude RPC - Tray wrapper that launches Node.js RPC from runtime/."""
+"""Claude Rich Presence - Tray wrapper that launches Node.js RPC from runtime/."""
 
 import os
+import json
 import signal
 import subprocess
 import sys
@@ -47,7 +48,37 @@ def release_lock():
 # --- Node.js subprocess ---
 
 node_process = None
-tray_status = {'text': 'Starting...'}
+APP_NAME = 'Claude Rich Presence'
+RPC_DIR = os.path.join(os.path.expanduser('~'), '.claude-rpc')
+STATUS_FILE = os.path.join(RPC_DIR, 'status.txt')
+tray_status = {
+    'text': APP_NAME,
+    'claude': 'Claude: Off',
+    'model': 'Auto-detect',
+    'provider': 'Provider: Unknown',
+    'discord': 'Discord: RPC disabled',
+}
+
+
+def refresh_tray_status_from_file():
+    try:
+        if not os.path.exists(STATUS_FILE):
+            return
+        raw = Path(STATUS_FILE).read_text(encoding='utf-8').strip()
+        if not raw:
+            return
+
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return
+
+        tray_status['claude'] = str(payload.get('claudeLine') or tray_status['claude'])
+        tray_status['model'] = str(payload.get('modelLine') or tray_status['model'])
+        tray_status['provider'] = str(payload.get('providerLine') or tray_status['provider'])
+        tray_status['discord'] = str(payload.get('discordLine') or tray_status['discord'])
+    except Exception:
+        pass
 
 
 def get_exe_dir():
@@ -265,28 +296,41 @@ def start_with_tray(stop_event):
         stop_node()
         icon.stop()
 
-    def status_text(item):
-        return tray_status['text']
+    def claude_text(item):
+        return tray_status['claude']
+
+    def model_text(item):
+        return tray_status['model']
+
+    def provider_text(item):
+        return tray_status['provider']
+
+    def discord_text(item):
+        return tray_status['discord']
 
     menu = pystray.Menu(
-        pystray.MenuItem('Claude RPC', None, enabled=False),
-        pystray.MenuItem(status_text, None, enabled=False),
+        pystray.MenuItem(APP_NAME, None, enabled=False),
+        pystray.MenuItem(claude_text, None, enabled=False),
+        pystray.MenuItem(model_text, None, enabled=False),
+        pystray.MenuItem(provider_text, None, enabled=False),
+        pystray.MenuItem(discord_text, None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem('Start on boot', on_boot, checked=lambda item: _is_startup_enabled()),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem('Quit', on_quit),
     )
 
-    icon = pystray.Icon('claude-rpc', image, 'Claude RPC', menu)
+    icon = pystray.Icon('claude-rich-presence', image, APP_NAME, menu)
 
     def update_tooltip():
         while not stop_event.is_set():
-            icon.title = f'Claude RPC - {tray_status["text"]}'
+            refresh_tray_status_from_file()
+            icon.title = APP_NAME
             try:
                 icon.update_menu()
             except Exception:
                 pass
-            stop_event.wait(5)
+            stop_event.wait(2)
 
     threading.Thread(target=update_tooltip, daemon=True).start()
     print('Tray icon ready')

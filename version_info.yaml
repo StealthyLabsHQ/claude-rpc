@@ -1,10 +1,10 @@
-Version: 2.2.1.0
+Version: 2.3.4.0
 CompanyName: StealthyLabs
-FileDescription: Claude RPC
+FileDescription: Claude Rich Presence
 InternalName: claude-rpc
 LegalCopyright: Copyright (c) 2026 StealthyLabs
 OriginalFilename: claude-rpc.exe
-ProductName: Claude RPC
+ProductName: Claude Rich Presence
 Translation:
   - langID: 0
     charsetID: 1200
