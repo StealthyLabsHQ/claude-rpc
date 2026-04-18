@@ -1,5 +1,42 @@
 # Changelog
 
+## v2.3.4 (2026-04-18)
+
+### Added
+- **Claude Desktop Dispatch submode** detection via UI Automation scoring (e.g. `Cowork - Dispatch`)
+- **Adaptive / Extended thinking** detection via `TogglePattern` — checks element, parent, and children so toggle state isn't inferred from label presence alone
+- **Effort level** display (Low / Medium / High / Extra high / Max) for both:
+  - Claude Desktop (parsed from UI button labels, e.g. `Sonnet 4.6 · High`)
+  - Claude Code CLI (read from `~/.claude/settings.json` `effortLevel` field)
+- **Provider expansion** — `detectProvider()` now also reads `~/.claude/settings.json` `env` block, supporting:
+  - Anthropic API
+  - Claude Account
+  - Amazon Bedrock (`CLAUDE_CODE_USE_BEDROCK`)
+  - Google GCP Vertex (`CLAUDE_CODE_USE_VERTEX`)
+  - Microsoft Foundry (`CLAUDE_CODE_USE_FOUNDRY`)
+
+### Changed
+- **Tray menu redesign** (Codex-style layout):
+  ```
+  Claude Rich Presence
+  Claude: Off / CLI (Code) / Desktop (Chat | Cowork | Cowork - Dispatch | Code)
+  Claude Sonnet 4.6 · Extra high
+  Provider: Anthropic API
+  Discord: Connected
+  ```
+- Model line no longer carries `Model:` prefix (matches Codex Rich Presence style)
+- Faster refresh intervals for Discord Rich Presence updates
+
+### Fixed
+- **`cachedModel` bakes in effort suffix** — effort is now re-read each tick, so `/effort medium` updates Discord within seconds without needing a session/model restart
+- **PowerShell regex middle dot (`·`)** — `\u00b7` escape fixes effort extraction under Windows-1252 decode
+- **`Sort-Object` on hashtables** — now uses a script block `{ $_.Score }`; sorting by property name silently ignored hashtable keys and broke mode scoring
+- **Adaptive/Extended leaks between modes** — `watcherState` now resets `adaptive`/`extended` when mode or model changes
+
+### Build
+- `requirements.txt` bumped for Python 3.14: `pyinstaller>=6.15.0`, `Pillow>=11.0.0`
+- `build.bat` uses `call` prefix for `.cmd` shims (npm, pip, pyinstaller) so the outer batch doesn't exit early
+
 ## v2.3.0 (2026-04-07)
 
 ### Added
