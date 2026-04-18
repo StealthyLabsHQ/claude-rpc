@@ -1,5 +1,9 @@
-<img width="1538" height="173" alt="image" src="https://github.com/user-attachments/assets/ccd6d142-7fda-42f0-b461-a6756cdfa9a1" />
-<img width="3840" height="2160" alt="image" src="https://github.com/user-attachments/assets/b20718e5-8137-4fcd-b018-24fdb14056ed" />
+<p align="center">
+  <img width="600" alt="Anthropic" src="https://github.com/user-attachments/assets/ccd6d142-7fda-42f0-b461-a6756cdfa9a1" />
+</p>
+<p align="center">
+  <img width="180" alt="Claude Rich Presence" src="https://github.com/user-attachments/assets/b20718e5-8137-4fcd-b018-24fdb14056ed" />
+</p>
 
 <h1 align="center">Claude Rich Presence</h1>
 
