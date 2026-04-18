@@ -17,8 +17,7 @@ Options:
   -v, --version    Show version number
   -h, --help       Show this help message
   --verbose        Enable verbose console output
-  --dnd            Start in Do Not Disturb mode
-  --no-idle        Disable idle timeout`);
+  --dnd            Start in Do Not Disturb mode`);
   process.exit(0);
 }
 
@@ -78,7 +77,6 @@ function log(level, ...msgs) {
 
 const CONFIG_PATH = path.join(RPC_DIR, 'config.json');
 const DEFAULT_CONFIG = {
-  idleTimeoutMinutes: 15,
   logoMode: 'url',
   dnd: false,
   verbose: false,
@@ -107,7 +105,6 @@ function saveConfig(cfg) {
 const config = loadConfig();
 // CLI overrides
 if (cliArgs.includes('--dnd')) config.dnd = true;
-if (cliArgs.includes('--no-idle')) config.idleTimeoutMinutes = 0;
 const VERBOSE = cliArgs.includes('--verbose') || config.verbose;
 
 // --- Validation helpers ---
@@ -232,7 +229,7 @@ function start() {
   const IS_LINUX = process.platform === 'linux';
   const WATCHER_INTERVAL_MS = 500;
   const WATCHER_SCRIPT_PATH = path.join(RPC_DIR, IS_WINDOWS ? 'claude-rpc-watcher.ps1' : 'claude-rpc-watcher.sh');
-  const WATCHER_VERSION = '22';
+  const WATCHER_VERSION = '23';
 
   let watcherState = {
     client: null,
@@ -243,7 +240,6 @@ function start() {
     adaptive: false,
     extended: false,
     codeInstances: 0,
-    inputAgoMs: null,
   };
   let watcherProcess = null;
   let watcherRestarts = 0;
@@ -263,24 +259,6 @@ function start() {
       fs.writeFileSync(WATCHER_SCRIPT_PATH, `# v${WATCHER_VERSION}
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
-
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class ClaudeRpcIdle {
-    [DllImport("user32.dll")]
-    public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
-    [StructLayout(LayoutKind.Sequential)]
-    public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
-    public static long GetIdleMs() {
-        LASTINPUTINFO lii = new LASTINPUTINFO();
-        lii.cbSize = (uint)Marshal.SizeOf(lii);
-        if (!GetLastInputInfo(ref lii)) return -1;
-        uint now = (uint)Environment.TickCount;
-        return (long)(now - lii.dwTime);
-    }
-}
-"@
 
 $intervalMs = ${WATCHER_INTERVAL_MS}
 $appData = [Environment]::GetFolderPath("ApplicationData")
@@ -619,9 +597,6 @@ while ($true) {
         $client = "code"
     }
 
-    $inputAgoMs = -1
-    try { $inputAgoMs = [ClaudeRpcIdle]::GetIdleMs() } catch {}
-
     $clientSafe = $client -replace '"', ''
     $modeSafe = $mode -replace '"', ''
     $submodeSafe = $submode -replace '"', ''
@@ -631,7 +606,7 @@ while ($true) {
     $extendedSafe = if ($extended) { "true" } else { "false" }
     $adaptiveSeenSafe = if ($adaptiveSeen) { "true" } else { "false" }
     $extendedSeenSafe = if ($extendedSeen) { "true" } else { "false" }
-    $json = "{""client"":""" + $clientSafe + """,""mode"":""" + $modeSafe + """,""submode"":""" + $submodeSafe + """,""model"":""" + $modelSafe + """,""effort"":""" + $effortSafe + """,""adaptive"":" + $adaptiveSafe + ",""extended"":" + $extendedSafe + ",""adaptiveSeen"":" + $adaptiveSeenSafe + ",""extendedSeen"":" + $extendedSeenSafe + ",""codeInstances"":" + $codeCount + ",""inputAgoMs"":" + $inputAgoMs + "}"
+    $json = "{""client"":""" + $clientSafe + """,""mode"":""" + $modeSafe + """,""submode"":""" + $submodeSafe + """,""model"":""" + $modelSafe + """,""effort"":""" + $effortSafe + """,""adaptive"":" + $adaptiveSafe + ",""extended"":" + $extendedSafe + ",""adaptiveSeen"":" + $adaptiveSeenSafe + ",""extendedSeen"":" + $extendedSeenSafe + ",""codeInstances"":" + $codeCount + "}"
     [Console]::Out.WriteLine($json)
     [Console]::Out.Flush()
     Start-Sleep -Milliseconds $intervalMs
@@ -727,10 +702,6 @@ done
           watcherState.submode = data.submode || null;
           watcherState.codeInstances = data.codeInstances || 0;
           watcherState.effort = data.effort || null;
-          const prevInputAgoMs = watcherState.inputAgoMs;
-          watcherState.inputAgoMs = (typeof data.inputAgoMs === 'number' && data.inputAgoMs >= 0) ? data.inputAgoMs : null;
-          // Fire presence refresh immediately when input activity is newly observed
-          if (watcherState.inputAgoMs !== null && prevInputAgoMs === null) triggerUpdate();
 
           const nextModel = data.model || null;
           const modelChanged = nextModel !== prevModel;
@@ -759,7 +730,6 @@ done
         adaptive: false,
         extended: false,
         codeInstances: 0,
-        inputAgoMs: null,
       };
       watcherLastUpdate = 0;
       watcherRestarts++;
@@ -1057,24 +1027,6 @@ done
         smallImageText: `Claude Desktop${desktopModeLabel ? ' - ' + desktopModeLabel : ''}`,
         buttons: [{ label: 'Claude Desktop', url: 'https://claude.ai/download' }, { label: 'GitHub', url: 'https://github.com/StealthyLabsHQ/claude-rpc' }],
       },
-      away: {
-        details: 'Away',
-        state: `${model || 'Claude'} | ${provider} \u00b7 inactive`,
-        largeImageKey: logoImage,
-        largeImageText: 'Away',
-        smallImageKey: 'terminal_icon',
-        smallImageText: 'No recent activity',
-        buttons: [{ label: 'Claude', url: 'https://claude.ai' }, { label: 'GitHub', url: 'https://github.com/StealthyLabsHQ/claude-rpc' }],
-      },
-      idle: {
-        details: 'Idle',
-        state: 'No active Claude session',
-        largeImageKey: logoImage,
-        largeImageText: 'Powered by Anthropic',
-        smallImageKey: null,
-        smallImageText: null,
-        buttons: [{ label: 'Claude', url: 'https://claude.ai' }, { label: 'GitHub', url: 'https://github.com/StealthyLabsHQ/claude-rpc' }],
-      },
     };
 
     return configs[clientType];
@@ -1188,30 +1140,6 @@ done
     }
   }
 
-  // --- Idle timeout ---
-
-  const IDLE_TIMEOUT_MS = config.idleTimeoutMinutes > 0
-    ? config.idleTimeoutMinutes * 60 * 1000
-    : 0; // 0 = disabled
-
-  function isSessionIdle(sessionFile) {
-    if (IDLE_TIMEOUT_MS === 0) return false; // Idle disabled
-    if (!sessionFile) return true;
-    // Grace window on cold start — watcher may not have reported input yet
-    if ((Date.now() - processStartTime) < STARTUP_GRACE_MS) return false;
-    // Primary signal: system keyboard/mouse activity (typing in CLI doesn't bump session file mtime)
-    if (watcherState.inputAgoMs !== null) {
-      return watcherState.inputAgoMs > IDLE_TIMEOUT_MS;
-    }
-    // Fallback when input info unavailable (non-Windows or PS P/Invoke failed): session file mtime
-    try {
-      const mtime = fs.statSync(sessionFile).mtimeMs;
-      return (Date.now() - mtime) > IDLE_TIMEOUT_MS;
-    } catch {
-      return true;
-    }
-  }
-
   // --- File system watcher ---
 
   let sessionDirty = true;
@@ -1250,7 +1178,7 @@ done
         embeds: [{
           title: `${TRAY_APP_NAME} - ${event}`,
           description: sanitizeString(details || '', 256),
-          color: event === 'Session Started' ? 0x6C63FF : event === 'Away' ? 0xFFAA00 : 0x999999,
+          color: event === 'Session Started' ? 0x6C63FF : 0x999999,
           timestamp: new Date().toISOString(),
         }],
       });
@@ -1269,8 +1197,6 @@ done
   // --- Main loop ---
 
   const UPDATE_INTERVAL = 1_000;
-  const STARTUP_GRACE_MS = 15_000; // don't mark Away during startup warm-up
-  const processStartTime = Date.now();
   let triggerUpdate = () => {};
 
   let currentClient = null;
@@ -1429,22 +1355,15 @@ done
             });
           }
 
-          const idle = detected === 'desktop' ? false : isSessionIdle(cachedSessionFile);
-          const isThinking = !idle && detected === 'code' ? detectThinkingState(cachedSessionFile) : false;
-          const activityType = idle ? 'away' : detected;
-
-          if (idle && lastActivityHash !== 'away') {
-            sendWebhook('Away', `${cachedModel || 'Claude'} idle`);
-          }
-
-          const displayModel = (!idle && detected === 'code') ? appendCodeEffort(cachedModel) : cachedModel;
-          const a = buildActivity(activityType, idle ? null : cachedSessionStats, cachedProjectName, isThinking, displayModel);
+          const isThinking = detected === 'code' ? detectThinkingState(cachedSessionFile) : false;
+          const displayModel = detected === 'code' ? appendCodeEffort(cachedModel) : cachedModel;
+          const a = buildActivity(detected, cachedSessionStats, cachedProjectName, isThinking, displayModel);
           const activityPayload = {
             type: 0,
             name: 'Claude AI',
             details: a.details,
             state: a.state,
-            startTimestamp: idle ? null : cachedSessionStart,
+            startTimestamp: cachedSessionStart,
             assets: {
               largeImage: a.largeImageKey,
               largeText: a.largeImageText,
@@ -1471,23 +1390,10 @@ done
             lastActivityHash = null;
           }
 
-          const a = buildActivity('idle', null, null, false, null);
-          const activityPayload = {
-            type: 0,
-            name: 'Claude AI',
-            details: a.details,
-            state: a.state,
-            assets: {
-              largeImage: a.largeImageKey,
-              largeText: a.largeImageText,
-            },
-            buttons: a.buttons,
-          };
-
-          const idleHash = buildPresenceChangeKey(activityPayload);
-          if (idleHash !== lastActivityHash) {
-            lastActivityHash = idleHash;
-            client.user.setActivity(activityPayload);
+          // No Claude session → clear Discord presence (no Idle placeholder)
+          if (lastActivityHash !== 'cleared') {
+            client.user.clearActivity();
+            lastActivityHash = 'cleared';
           }
         }
       }
