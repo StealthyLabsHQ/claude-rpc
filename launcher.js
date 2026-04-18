@@ -17,6 +17,7 @@ const IS_WINDOWS = process.platform === 'win32';
 const RPC_DIR    = path.join(os.homedir(), '.claude-rpc');
 const STATUS_FILE = path.join(RPC_DIR, 'status.txt');
 const CONFIG_PATH = path.join(RPC_DIR, 'config.json');
+const APP_NAME = 'Claude Rich Presence';
 
 fs.mkdirSync(RPC_DIR, { recursive: true });
 
@@ -80,16 +81,18 @@ function generateTrayScript(iconPath) {
     const icon   = iconPath.replace(/\\/g, '\\\\').replace(/'/g, "''");
     const status = STATUS_FILE.replace(/\\/g, '\\\\').replace(/'/g, "''");
     const config = CONFIG_PATH.replace(/\\/g, '\\\\').replace(/'/g, "''");
+    const appName = APP_NAME.replace(/\\/g, '\\\\').replace(/'/g, "''");
 
     return `
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+$appName = '${appName}'
 $statusFile = '${status}'
 $configFile  = '${config}'
 
 $notifyIcon = New-Object System.Windows.Forms.NotifyIcon
-$notifyIcon.Text    = "Claude RPC"
+$notifyIcon.Text    = $appName
 $notifyIcon.Visible = $true
 
 $iconPath = '${icon}'
@@ -99,12 +102,18 @@ if ($iconPath -and (Test-Path $iconPath)) {
 } else { $notifyIcon.Icon = [System.Drawing.SystemIcons]::Application }
 
 $contextMenu = New-Object System.Windows.Forms.ContextMenuStrip
-$titleItem   = $contextMenu.Items.Add("Claude RPC")
+$titleItem   = $contextMenu.Items.Add($appName)
 $titleItem.Enabled = $false
 $titleItem.Font    = New-Object System.Drawing.Font($titleItem.Font, [System.Drawing.FontStyle]::Bold)
 
-$statusItem = $contextMenu.Items.Add("Starting...")
-$statusItem.Enabled = $false
+$providerItem = $contextMenu.Items.Add("Provider: Unknown")
+$providerItem.Enabled = $false
+
+$modelItem = $contextMenu.Items.Add("Model: Auto-detect")
+$modelItem.Enabled = $false
+
+$discordItem = $contextMenu.Items.Add("Discord: RPC disabled")
+$discordItem.Enabled = $false
 $contextMenu.Items.Add("-") | Out-Null
 
 $dndItem = New-Object System.Windows.Forms.ToolStripMenuItem("Do Not Disturb")
@@ -150,10 +159,14 @@ $timer.Interval = 3000
 $timer.Add_Tick({
     try {
         if (Test-Path $statusFile) {
-            $s = (Get-Content $statusFile -Raw -EA SilentlyContinue).Trim()
-            if ($s) {
-                $notifyIcon.Text = "Claude RPC - " + $s.Substring(0, [Math]::Min($s.Length, 63))
-                $statusItem.Text = $s
+            $raw = (Get-Content $statusFile -Raw -EA SilentlyContinue).Trim()
+            if ($raw) {
+                try {
+                    $status = $raw | ConvertFrom-Json -ErrorAction Stop
+                    if ($status.providerLine) { $providerItem.Text = [string]$status.providerLine }
+                    if ($status.modelLine)    { $modelItem.Text = [string]$status.modelLine }
+                    if ($status.discordLine)  { $discordItem.Text = [string]$status.discordLine }
+                } catch {}
             }
         }
     } catch {}
