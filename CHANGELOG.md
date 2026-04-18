@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.3.5 (2026-04-18)
+
+### Changed
+- **Activity type**: `Watching Claude AI` → `Playing Claude AI` (Discord RPC `type: 3` → `type: 0`)
+- **Idle detection** now driven by system keyboard/mouse activity via Win32 `GetLastInputInfo`. Typing anywhere (including inside the Claude Code CLI input box) keeps the presence active; "Away" only fires after `idleTimeoutMinutes` of zero user input.
+
+### Added
+- PowerShell watcher emits `inputAgoMs` field (system idle time in ms) — v22 watcher
+- 15s startup grace window so the presence never flashes "Away" during watcher warm-up
+- Event-driven presence refresh — first input observation fires an immediate update instead of waiting for the next 1s poll
+
 ## v2.3.4 (2026-04-18)
 
 ### Added
