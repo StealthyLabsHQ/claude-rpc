@@ -1,139 +1,98 @@
-<p align="center">
-  <img width="600" alt="Anthropic" src="https://github.com/user-attachments/assets/ccd6d142-7fda-42f0-b461-a6756cdfa9a1" />
-</p>
-<p align="center">
-  <img width="180" alt="Claude Rich Presence" src="https://github.com/user-attachments/assets/b20718e5-8137-4fcd-b018-24fdb14056ed" />
-</p>
+# Claude RPC
 
-<h1 align="center">Claude Rich Presence</h1>
-
-<p align="center">
-  Discord Rich Presence for Claude AI - displays real-time activity status on your Discord profile.
-</p>
-
----
+Lightweight Discord Rich Presence for Claude Code and Claude Desktop.
 
 ## Features
 
-- **Auto-detect Claude client**: Claude Code or Claude Desktop
-- **Claude Desktop mode**: detects active tab (Chat, Cowork, Code)
-- **Live model tracking**: Opus 4.6, Sonnet 4.6, Haiku 4.5, Opus 3, etc.
-- **Extended thinking**: shows when Extended mode is enabled
-- **1M context detection**: displays (1M) for supported models
-- **Session elapsed time**: linked to your actual session
-- **Multi-instance**: shows instance count when multiple Claude Code are running
-- **Idle timeout**: shows Away after 15 minutes of inactivity (configurable)
-- **Do Not Disturb**: hide your presence when you need focus
-- **System tray**: Start on boot toggle (Windows)
-- **Zero config**: no Discord Application ID needed
-- **Webhook notifications**: optional Discord webhook for session events
-- **Config file**: persistent preferences at `~/.claude-rpc/config.json`
-- **Logging**: debug logs at `~/.claude-rpc/rpc.log`
-- **Security hardened**: audit passed, all findings fixed
+- Native Tauri/Rust system tray app
+- No bundled Node.js, Python, PyInstaller, or sidecar daemon
+- Discord IPC implemented in Rust
+- Single process in Task Manager: `Claude RPC`
+- Claude Code and Claude Desktop process detection
+- Claude Desktop mode detection: Chat, Code, Cowork, Dispatch
+- Claude Code model/project/session timestamp from `~/.claude/projects/*.jsonl`
+- Provider detection from Claude settings, env, API key, or OAuth credential patterns
+- Usage limit display with cached values: 5h, All, Sonnet only, Design
+- Optional visibility toggles for provider, effort, and usage limits
+- RPC modes: Playing, Watching, Listening, Competing
+- Optional Discord buttons in Watching mode
+- DND mode to clear Discord activity while detection keeps running
+- Dark/System/Light settings window
 
-## Installation
+## Download
 
-### Option 1 - Standalone exe (recommended)
+Use the latest GitHub release:
 
-1. Download `claude-rpc-windows-x64.zip` from the [latest release](https://github.com/StealthyLabsHQ/claude-rpc/releases/latest)
-2. Extract the folder
-3. Double-click **`claude-rpc.exe`**
+- `claude-rpc.exe` - portable app
+- `Claude RPC_3.0.0_x64-setup.exe` - Windows installer
 
-No install needed - Node.js is bundled inside.
+## Build
 
-### Option 2 - From source
+Requirements:
 
-Requires [Node.js](https://nodejs.org/) 18+.
+- Rust + Cargo
+- Node.js only for Tauri CLI during build
+- Visual Studio Build Tools on Windows
 
-```bash
-git clone https://github.com/StealthyLabsHQ/claude-rpc.git
-cd claude-rpc
+```powershell
 npm install
+npm test
+npm run build
 ```
 
-**With system tray (Windows):**
-```bash
-npm start
-```
+Outputs:
 
-**Console mode (all platforms):**
-```bash
-npm run start:cli
-```
-
-**Or run directly:**
-```bash
-node --no-deprecation index.js
-```
-
-## CLI Flags
-
-```
-claude-rpc [options]
-
-  -v, --version    Show version number
-  -h, --help       Show help message
-  --verbose        Enable verbose console output
-  --dnd            Start in Do Not Disturb mode
+```text
+bin\claude-rpc.exe
+src-tauri\target\release\bundle\nsis\Claude RPC_3.0.0_x64-setup.exe
 ```
 
 ## Configuration
 
-Claude Rich Presence uses a config file at `~/.claude-rpc/config.json`. Create it to customize behavior:
+Settings are stored at:
+
+```text
+%USERPROFILE%\.claude-rpc\config.json
+```
+
+Example:
 
 ```json
 {
   "logoMode": "url",
   "dnd": false,
-  "verbose": false,
-  "webhookUrl": null
+  "showLimits": true,
+  "showLimit5h": true,
+  "showLimitAll": true,
+  "showLimitSonnet": true,
+  "showLimitDesign": true,
+  "showProvider": true,
+  "showEffort": true,
+  "rpcMode": "watching",
+  "buttons": [
+    { "label": "Claude", "url": "https://claude.ai" },
+    { "label": "GitHub Repo", "url": "https://github.com/StealthyLabsHQ/claude-rpc" }
+  ]
 }
 ```
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `logoMode` | string | `"url"` | Logo source: `"url"` (GitHub) or `"asset"` (Discord app) |
-| `dnd` | boolean | `false` | Do Not Disturb - hides presence |
-| `verbose` | boolean | `false` | Verbose console logging |
-| `webhookUrl` | string | `null` | Discord webhook URL for session notifications |
+## Detection
 
-## Auto-detection
+| Target | Method |
+|---|---|
+| Claude Desktop | `claude.exe` process path |
+| Claude Desktop mode | `%APPDATA%\Claude\claude_desktop_config.json` + UI Automation |
+| Claude Desktop model/effort | UI Automation labels |
+| Claude usage limits | UI Automation on Usage page + `.claude-rpc\limits-cache.json` |
+| Claude Code | `claude.exe` process path or recent JSONL activity |
+| Claude Code model | `~\.claude\settings.json` or JSONL session tail |
+| Provider | env/settings/API key/OAuth credential patterns |
 
-| Detection | Source |
-|-----------|--------|
-| **Client** | Process detection (`claude.exe` path) |
-| **Desktop mode** | Windows UI Automation (Chat / Cowork / Code) |
-| **Desktop model** | Windows UI Automation (model selector button) |
-| **Code model** | `~/.claude/settings.json` or session JSONL |
-| **Provider** | Environment variables, API key patterns, OAuth credentials |
-| **Session time** | First timestamp in the active session JSONL |
-| **Multi-instance** | Process count from watcher |
+## Notes
 
-## Platform Support
+Claude usage percentages are only available after Claude exposes them on the Usage page. Use `Refresh` in settings to open the Usage page, then Claude RPC caches the latest valid values.
 
-| Feature | Windows | macOS | Linux |
-|---------|---------|-------|-------|
-| Claude Code detection | Full | Full | Full |
-| Claude Desktop detection | Full (UI Automation) | Basic (AppleScript) | N/A |
-| Desktop mode (Chat/Cowork/Code) | Full | Requires accessibility | N/A |
-| Desktop model detection | Full | Via JSONL only | N/A |
-| System tray | Full (Start on boot) | Terminal mode | Terminal mode |
-| Standalone exe | Yes (.exe + bundled Node.js) | Run from source | Run from source |
-
-## Debugging
-
-Logs are written to `~/.claude-rpc/rpc.log` (auto-rotated at 1 MB).
-
-Run with verbose mode for console output:
-```bash
-node index.js --verbose
-```
-
-## Requirements
-
-- **Windows** 10/11 or **macOS** 12+ or **Linux**
-- [Discord](https://discord.com/) desktop client running
-- [Claude Code](https://claude.ai/code) or [Claude Desktop](https://claude.ai/download)
+The v3 refactor intentionally removed the legacy Node/Python runtime path. Runtime is now a single lightweight Tauri executable.
 
 ## License
 

@@ -1,5 +1,33 @@
 # Changelog
 
+## v3.0.0 (2026-04-26)
+
+### Added
+- Native Tauri/Rust settings window and system tray.
+- In-process Rust Discord IPC, process detection, status writing, and presence updates.
+- Discord RPC modes: Playing, Watching, Listening, and Competing.
+- Optional Discord buttons in Watching mode.
+- DND toggle that clears Discord activity while Claude detection keeps running.
+- Dark/System/Light settings themes.
+- Claude Desktop UI Automation detection for mode, submode, model, effort, and usage limits.
+- Usage limit controls for 5h, All, Sonnet only, and Design values.
+- Cached usage limit values so RPC can keep showing percentages away from the Usage page.
+- Refresh button to open Claude Usage and update cached limits.
+- Optional RPC visibility toggles for provider and effort labels.
+- Preview card that mirrors current RPC configuration.
+
+### Changed
+- Refactored Claude RPC to a native Tauri/Rust daemon.
+- Removed the Node.js/Python/PyInstaller runtime path from the main build.
+- Discord IPC, process detection, status writing, tray settings, and presence updates now run in-process.
+- Build output is a single lightweight `bin/claude-rpc.exe`.
+- Task Manager now groups settings and daemon under the same Tauri app process tree.
+- Settings window resized for the expanded controls.
+
+### Removed
+- Bundled `node.exe`, `node_modules`, PyInstaller sidecar, PowerShell tray, and legacy JS daemon entry points.
+- Legacy Python/Node entry points and build scripts.
+
 ## v2.4.0 (2026-04-18)
 
 ### Removed

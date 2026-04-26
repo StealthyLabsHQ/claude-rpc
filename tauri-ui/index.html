@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Claude RPC Settings</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script defer src="./main.js"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div class="title-row">
+          <h1>Claude RPC Settings</h1>
+          <div class="theme-switch" aria-label="Theme">
+            <button type="button" data-theme-option="dark">Dark</button>
+            <button type="button" data-theme-option="system">System</button>
+            <button type="button" data-theme-option="light">Light</button>
+          </div>
+        </div>
+        <p id="status" class="status">Claude: Off</p>
+      </header>
+
+      <section class="panel">
+        <div class="legend">Buttons</div>
+        <div class="grid head">
+          <span>Slot</span>
+          <span>Label</span>
+          <span>URL</span>
+        </div>
+        <div class="grid">
+          <label>Button 1</label>
+          <input id="label0" maxlength="32" spellcheck="false" />
+          <input id="url0" spellcheck="false" />
+        </div>
+        <div class="grid">
+          <label>Button 2</label>
+          <input id="label1" maxlength="32" spellcheck="false" />
+          <input id="url1" spellcheck="false" />
+        </div>
+      </section>
+
+      <section class="panel mode-panel">
+        <div class="legend">Mode</div>
+        <label for="rpc-mode">RPC mode</label>
+        <select id="rpc-mode">
+          <option value="playing">Playing</option>
+          <option value="watching">Watching (TV)</option>
+          <option value="listening">Listening</option>
+          <option value="competing">Competing</option>
+        </select>
+        <p>Buttons are sent only in Watching mode.</p>
+        <label>DND</label>
+        <button type="button" id="dnd-toggle" class="toggle" aria-pressed="false">DND off</button>
+        <p>Clears Discord activity while Claude detection keeps running.</p>
+        <label>RPC info</label>
+        <div class="rpc-info-controls">
+          <button type="button" id="provider-toggle" class="toggle" aria-pressed="true">Provider</button>
+          <button type="button" id="effort-toggle" class="toggle" aria-pressed="true">Effort</button>
+        </div>
+        <p>Controls provider and effort labels in Discord RPC.</p>
+        <label>Limits</label>
+        <div class="limit-controls">
+          <button type="button" id="limits-toggle" class="toggle" aria-pressed="true">Shown</button>
+          <button type="button" id="limit-5h-toggle" class="toggle compact" aria-pressed="true">5h</button>
+          <button type="button" id="limit-all-toggle" class="toggle compact" aria-pressed="true">All</button>
+          <button type="button" id="limit-sonnet-toggle" class="toggle compact" aria-pressed="true">Sonnet only</button>
+          <button type="button" id="limit-design-toggle" class="toggle compact" aria-pressed="true">Design</button>
+          <button type="button" id="refresh-limits" class="ghost">Refresh</button>
+        </div>
+      </section>
+
+      <section class="panel appearance-panel">
+        <div class="legend">Appearance</div>
+        <label for="logo-mode">Logo</label>
+        <select id="logo-mode">
+          <option value="url">GitHub image URL</option>
+          <option value="asset">Discord asset</option>
+        </select>
+        <p>Use URL unless you uploaded a Discord Developer Portal asset named claude_logo.</p>
+        <label>Debug</label>
+        <button type="button" id="debug-toggle" class="toggle" aria-pressed="false">Debug off</button>
+        <p>Writes UIAutomation dump to .claude-rpc/ui-debug.json.</p>
+      </section>
+
+      <section class="panel preview-panel">
+        <div class="legend">Preview</div>
+        <div class="rpc-preview">
+          <img class="preview-icon" src="./claude_logo.png" alt="" />
+          <div class="preview-copy">
+            <strong id="preview-activity">Playing Claude</strong>
+            <span id="preview-details">Claude Code</span>
+            <span id="preview-state">Auto-detect</span>
+            <div id="preview-buttons" class="preview-buttons"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel presets">
+        <div class="legend">Presets</div>
+        <button type="button" data-preset="claude">Claude</button>
+        <button type="button" data-preset="desktop">Desktop</button>
+        <button type="button" data-preset="repo">GitHub repo</button>
+      </section>
+
+      <footer>
+        <button type="button" id="clear" class="ghost">Clear</button>
+        <span id="message"></span>
+        <button type="button" id="apply">Apply</button>
+        <button type="button" id="close" class="primary">Close</button>
+      </footer>
+    </main>
+  </body>
+</html>

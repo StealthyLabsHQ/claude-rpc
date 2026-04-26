@@ -1,6 +1,0 @@
-pystray>=0.19.5
-Pillow>=11.0.0
-python-dotenv>=1.0.1
-watchdog>=4.0.2
-uiautomation>=2.0.20; sys_platform == "win32"
-backports.tarfile>=1.2.0
