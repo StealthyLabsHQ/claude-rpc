@@ -13,57 +13,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis -y --no-progress
+
       - run: npm ci
 
-      # --- Prepare runtime staging ---
-      - name: Stage runtime
+      - run: node --check tauri-ui/main.js
+
+      - run: npm test
+
+      - run: npm run build
+
+      - name: Verify release artifacts
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path build\staging\runtime | Out-Null
-          Copy-Item index.js build\staging\runtime\
-          Copy-Item tray.js build\staging\runtime\
-          Copy-Item secure-env.js build\staging\runtime\
-          Copy-Item package.json build\staging\runtime\
-          if (Test-Path .env) { Copy-Item .env build\staging\runtime\ }
-          Set-Location build\staging\runtime
-          npm install --omit=dev --ignore-scripts --no-fund --no-audit
+          $setup = Get-ChildItem "src-tauri\target\release\bundle\nsis" -Filter "Claude RPC_*_x64-setup.exe" | Select-Object -First 1
+          if (!(Test-Path "bin\claude-rpc.exe")) { throw "Missing bin\claude-rpc.exe" }
+          if (!$setup) { throw "Missing NSIS installer" }
+          Get-FileHash "bin\claude-rpc.exe", $setup.FullName -Algorithm SHA256
 
-      - name: Bundle node.exe into staging
-        shell: pwsh
-        run: Copy-Item "$env:ProgramFiles\nodejs\node.exe" build\staging\runtime\node.exe
-
-      - name: Stage logo
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path build\staging\logo | Out-Null
-          Copy-Item logo\* build\staging\logo\
-
-      # --- Build single all-in-one exe ---
-      - name: Build claude-rpc.exe (PyInstaller all-in-one)
-        shell: pwsh
-        run: |
-          pip install pyinstaller==6.14.1 pyinstaller-versionfile==2.1.1 -r requirements.txt --quiet
-          create-version-file version_info.yaml --outfile version_info.txt
-          pyinstaller --onefile --windowed `
-            --icon=logo\anthropic-rpc.ico `
-            --name=claude-rpc `
-            --distpath=dist `
-            --version-file=version_info.txt `
-            --add-data="build\staging\runtime;runtime" `
-            --add-data="build\staging\logo;logo" `
-            main.py
-
-      - name: Upload release
+      - name: Upload GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/claude-rpc.exe
+          files: |
+            bin/claude-rpc.exe
+            src-tauri/target/release/bundle/nsis/Claude RPC_*_x64-setup.exe
           generate_release_notes: true
