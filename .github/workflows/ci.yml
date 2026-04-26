@@ -8,26 +8,19 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node-version: [18, 20, 22]
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node-version }}
-          cache: npm
-      - run: npm ci
-      - run: npm test
 
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
       - run: npm ci
-      - run: node --check index.js && node --check tray.js && node --check secure-env.js
+
+      - run: node --check tauri-ui/main.js
+
+      - run: npm test
