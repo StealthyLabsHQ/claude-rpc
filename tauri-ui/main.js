@@ -28,6 +28,7 @@ const fields = {
   previewState: document.querySelector('#preview-state'),
   previewButtons: document.querySelector('#preview-buttons'),
   themeButtons: [...document.querySelectorAll('[data-theme-option]')],
+  sectionToggles: [...document.querySelectorAll('.section-toggle')],
 };
 
 let loading = true;
@@ -316,5 +317,24 @@ function applyTheme(theme) {
   localStorage.setItem('claude-rpc-theme', safeTheme);
 }
 
+function initSections() {
+  fields.sectionToggles.forEach((button) => {
+    const panel = button.closest('.panel');
+    const key = `claude-rpc-section-${panel.dataset.section}`;
+    const sync = (expanded) => {
+      panel.classList.toggle('collapsed', !expanded);
+      button.setAttribute('aria-expanded', String(expanded));
+    };
+
+    sync(localStorage.getItem(key) !== 'collapsed');
+    button.addEventListener('click', () => {
+      const expanded = button.getAttribute('aria-expanded') !== 'true';
+      sync(expanded);
+      localStorage.setItem(key, expanded ? 'expanded' : 'collapsed');
+    });
+  });
+}
+
+initSections();
 window.addEventListener('DOMContentLoaded', load);
 setInterval(refreshStatus, 1000);

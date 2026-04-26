@@ -1,6 +1,6 @@
 [package]
 name = "claude_rpc_tray"
-version = "3.0.0"
+version = "3.0.1"
 description = "Claude RPC"
 authors = ["StealthyLabs"]
 license = "ISC"

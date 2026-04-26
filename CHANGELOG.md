@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.0.1 (2026-04-26)
+
+### Changed
+- Improved settings layout spacing, alignment, and window height.
+- Added collapsible settings sections.
+- Restored vertical scrolling only when expanded content overflows.
+- Fixed dark theme dropdown option readability.
+
 ## v3.0.0 (2026-04-26)
 
 ### Added
