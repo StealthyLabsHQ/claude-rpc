@@ -21,8 +21,8 @@
         <p id="status" class="status">Claude: Off</p>
       </header>
 
-      <section class="panel">
-        <div class="legend">Buttons</div>
+      <section class="panel" data-section="buttons">
+        <button type="button" class="legend section-toggle" aria-expanded="true">Buttons</button>
         <div class="grid head">
           <span>Slot</span>
           <span>Label</span>
@@ -40,8 +40,8 @@
         </div>
       </section>
 
-      <section class="panel mode-panel">
-        <div class="legend">Mode</div>
+      <section class="panel mode-panel" data-section="mode">
+        <button type="button" class="legend section-toggle" aria-expanded="true">Mode</button>
         <label for="rpc-mode">RPC mode</label>
         <select id="rpc-mode">
           <option value="playing">Playing</option>
@@ -70,8 +70,8 @@
         </div>
       </section>
 
-      <section class="panel appearance-panel">
-        <div class="legend">Appearance</div>
+      <section class="panel appearance-panel" data-section="appearance">
+        <button type="button" class="legend section-toggle" aria-expanded="true">Appearance</button>
         <label for="logo-mode">Logo</label>
         <select id="logo-mode">
           <option value="url">GitHub image URL</option>
@@ -83,8 +83,8 @@
         <p>Writes UIAutomation dump to .claude-rpc/ui-debug.json.</p>
       </section>
 
-      <section class="panel preview-panel">
-        <div class="legend">Preview</div>
+      <section class="panel preview-panel" data-section="preview">
+        <button type="button" class="legend section-toggle" aria-expanded="true">Preview</button>
         <div class="rpc-preview">
           <img class="preview-icon" src="./claude_logo.png" alt="" />
           <div class="preview-copy">
@@ -96,8 +96,8 @@
         </div>
       </section>
 
-      <section class="panel presets">
-        <div class="legend">Presets</div>
+      <section class="panel presets" data-section="presets">
+        <button type="button" class="legend section-toggle" aria-expanded="true">Presets</button>
         <button type="button" data-preset="claude">Claude</button>
         <button type="button" data-preset="desktop">Desktop</button>
         <button type="button" data-preset="repo">GitHub repo</button>

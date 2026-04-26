@@ -1,6 +1,6 @@
 {
   "name": "claude-rpc",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "Claude RPC",
   "scripts": {
     "start": "tauri dev",

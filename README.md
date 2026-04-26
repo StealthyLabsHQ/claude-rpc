@@ -24,7 +24,7 @@ Lightweight Discord Rich Presence for Claude Code and Claude Desktop.
 Use the latest GitHub release:
 
 - `claude-rpc.exe` - portable app
-- `Claude RPC_3.0.0_x64-setup.exe` - Windows installer
+- `Claude RPC_3.0.1_x64-setup.exe` - Windows installer
 
 ## Build
 
@@ -44,7 +44,7 @@ Outputs:
 
 ```text
 bin\claude-rpc.exe
-src-tauri\target\release\bundle\nsis\Claude RPC_3.0.0_x64-setup.exe
+src-tauri\target\release\bundle\nsis\Claude RPC_3.0.1_x64-setup.exe
 ```
 
 ## Configuration
