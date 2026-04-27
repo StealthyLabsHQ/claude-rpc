@@ -29,11 +29,15 @@ struct DaemonState {
 #[derive(Default)]
 struct TrayMenuState {
     dnd: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
+    start_on_windows: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
     mode_playing: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
     mode_watching: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
     mode_listening: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
     mode_competing: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
 }
+
+const STARTUP_REG_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+const STARTUP_REG_VALUE: &str = "Claude RPC";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -275,6 +279,14 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let show_item = MenuItem::with_id(app, "show", "Settings", true, None::<&str>)?;
     let dnd_item =
         CheckMenuItem::with_id(app, "dnd", "Do Not Disturb", true, config.dnd, None::<&str>)?;
+    let start_on_windows_item = CheckMenuItem::with_id(
+        app,
+        "start_on_windows",
+        "Start on Windows",
+        true,
+        is_start_on_windows_enabled(),
+        None::<&str>,
+    )?;
     let mode_playing_item = CheckMenuItem::with_id(
         app,
         "mode_playing",
@@ -317,6 +329,7 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
             &show_item,
             &separator_1,
             &dnd_item,
+            &start_on_windows_item,
             &separator_2,
             &mode_playing_item,
             &mode_watching_item,
@@ -329,6 +342,10 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
 
     let tray_state = app.state::<TrayMenuState>();
     *tray_state.dnd.lock().expect("tray menu mutex poisoned") = Some(dnd_item.clone());
+    *tray_state
+        .start_on_windows
+        .lock()
+        .expect("tray menu mutex poisoned") = Some(start_on_windows_item.clone());
     *tray_state
         .mode_playing
         .lock()
@@ -357,6 +374,10 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
                 if let Ok(config) = update_config(|config| config.dnd = !config.dnd) {
                     sync_tray_menu(app, &config);
                 }
+            }
+            "start_on_windows" => {
+                let _ = set_start_on_windows(!is_start_on_windows_enabled());
+                sync_start_on_windows_menu(app);
             }
             "mode_playing" => set_mode(app, "playing"),
             "mode_watching" => set_mode(app, "watching"),
@@ -403,6 +424,7 @@ fn sync_tray_menu(app: &tauri::AppHandle, config: &ClaudeConfig) {
     if let Some(item) = state.dnd.lock().expect("tray menu mutex poisoned").clone() {
         let _ = item.set_checked(config.dnd);
     }
+    sync_start_on_windows_menu(app);
     if let Some(item) = state
         .mode_playing
         .lock()
@@ -435,6 +457,64 @@ fn sync_tray_menu(app: &tauri::AppHandle, config: &ClaudeConfig) {
     {
         let _ = item.set_checked(config.rpc_mode == "competing");
     };
+}
+
+fn sync_start_on_windows_menu(app: &tauri::AppHandle) {
+    let state = app.state::<TrayMenuState>();
+    if let Some(item) = state
+        .start_on_windows
+        .lock()
+        .expect("tray menu mutex poisoned")
+        .clone()
+    {
+        let _ = item.set_checked(is_start_on_windows_enabled());
+    };
+}
+
+fn is_start_on_windows_enabled() -> bool {
+    std::process::Command::new("reg.exe")
+        .args(["query", STARTUP_REG_KEY, "/v", STARTUP_REG_VALUE])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn set_start_on_windows(enabled: bool) -> Result<(), String> {
+    if enabled {
+        let exe = std::env::current_exe().map_err(|err| err.to_string())?;
+        let command = format!("\"{}\"", exe.to_string_lossy());
+        run_reg(&[
+            "add",
+            STARTUP_REG_KEY,
+            "/v",
+            STARTUP_REG_VALUE,
+            "/t",
+            "REG_SZ",
+            "/d",
+            command.as_str(),
+            "/f",
+        ])
+    } else if is_start_on_windows_enabled() {
+        run_reg(&["delete", STARTUP_REG_KEY, "/v", STARTUP_REG_VALUE, "/f"])
+    } else {
+        Ok(())
+    }
+}
+
+fn run_reg(args: &[&str]) -> Result<(), String> {
+    let output = std::process::Command::new("reg.exe")
+        .args(args)
+        .output()
+        .map_err(|err| err.to_string())?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        Err(format!("reg.exe failed: {}", output.status))
+    } else {
+        Err(stderr)
+    }
 }
 
 fn start_daemon_inner(_app: &tauri::AppHandle, state: &DaemonState) {

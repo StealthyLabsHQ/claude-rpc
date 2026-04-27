@@ -1,5 +1,10 @@
 # Changelog
 
+## v3.1.0 (2026-04-27)
+
+### Added
+- Added a tray menu toggle to start Claude RPC with Windows.
+
 ## v3.0.1 (2026-04-26)
 
 ### Changed
