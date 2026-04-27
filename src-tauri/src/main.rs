@@ -36,8 +36,12 @@ struct TrayMenuState {
     mode_competing: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
 }
 
+#[cfg(windows)]
 const STARTUP_REG_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+#[cfg(windows)]
 const STARTUP_REG_VALUE: &str = "Claude RPC";
+#[cfg(target_os = "macos")]
+const MACOS_LAUNCH_AGENT_LABEL: &str = "eu.stealthylabs.claude-rpc";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -230,11 +234,25 @@ fn close_settings(app: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn refresh_limits() -> Result<(), String> {
-    std::process::Command::new("explorer.exe")
-        .arg("https://claude.ai/settings/usage")
-        .spawn()
-        .map(|_| ())
-        .map_err(|err| err.to_string())
+    open_url("https://claude.ai/settings/usage")
+}
+
+fn open_url(url: &str) -> Result<(), String> {
+    let mut command = if cfg!(target_os = "macos") {
+        let mut command = std::process::Command::new("open");
+        command.arg(url);
+        command
+    } else if cfg!(windows) {
+        let mut command = std::process::Command::new("explorer.exe");
+        command.arg(url);
+        command
+    } else {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+
+    command.spawn().map(|_| ()).map_err(|err| err.to_string())
 }
 
 fn main() {
@@ -282,7 +300,7 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let start_on_windows_item = CheckMenuItem::with_id(
         app,
         "start_on_windows",
-        "Start on Windows",
+        startup_menu_label(),
         true,
         is_start_on_windows_enabled(),
         None::<&str>,
@@ -471,6 +489,17 @@ fn sync_start_on_windows_menu(app: &tauri::AppHandle) {
     };
 }
 
+#[cfg(windows)]
+fn startup_menu_label() -> &'static str {
+    "Start on Windows"
+}
+
+#[cfg(not(windows))]
+fn startup_menu_label() -> &'static str {
+    "Start at Login"
+}
+
+#[cfg(windows)]
 fn is_start_on_windows_enabled() -> bool {
     std::process::Command::new("reg.exe")
         .args(["query", STARTUP_REG_KEY, "/v", STARTUP_REG_VALUE])
@@ -479,6 +508,19 @@ fn is_start_on_windows_enabled() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(target_os = "macos")]
+fn is_start_on_windows_enabled() -> bool {
+    launch_agent_path()
+        .map(|path| path.exists())
+        .unwrap_or(false)
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn is_start_on_windows_enabled() -> bool {
+    false
+}
+
+#[cfg(windows)]
 fn set_start_on_windows(enabled: bool) -> Result<(), String> {
     if enabled {
         let exe = std::env::current_exe().map_err(|err| err.to_string())?;
@@ -501,6 +543,48 @@ fn set_start_on_windows(enabled: bool) -> Result<(), String> {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn set_start_on_windows(enabled: bool) -> Result<(), String> {
+    let path = launch_agent_path()?;
+    if enabled {
+        let exe = std::env::current_exe().map_err(|err| err.to_string())?;
+        let exe = xml_escape(&exe.to_string_lossy());
+        let plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{MACOS_LAUNCH_AGENT_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{exe}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>
+"#
+        );
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+        fs::write(path, plist).map_err(|err| err.to_string())
+    } else {
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn set_start_on_windows(_enabled: bool) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(windows)]
 fn run_reg(args: &[&str]) -> Result<(), String> {
     let output = std::process::Command::new("reg.exe")
         .args(args)
@@ -515,6 +599,25 @@ fn run_reg(args: &[&str]) -> Result<(), String> {
     } else {
         Err(stderr)
     }
+}
+
+#[cfg(target_os = "macos")]
+fn launch_agent_path() -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME").ok_or_else(|| "HOME is not set".to_string())?;
+    Ok(Path::new(&home)
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{MACOS_LAUNCH_AGENT_LABEL}.plist")))
+}
+
+#[cfg(target_os = "macos")]
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 fn start_daemon_inner(_app: &tauri::AppHandle, state: &DaemonState) {
@@ -660,10 +763,33 @@ fn status_path() -> Result<PathBuf, String> {
 }
 
 fn app_dir() -> Result<PathBuf, String> {
+    if let Ok(path) = std::env::var("CLAUDE_RPC_DIR") {
+        return Ok(expand_home(&path));
+    }
     if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
         return Ok(Path::new(&home).join(".claude-rpc"));
     }
     std::env::current_dir()
         .map(|path| path.join(".claude-rpc"))
         .map_err(|err| err.to_string())
+}
+
+fn expand_home(value: &str) -> PathBuf {
+    if value == "~" {
+        return home_dir();
+    }
+    if let Some(rest) = value
+        .strip_prefix("~/")
+        .or_else(|| value.strip_prefix("~\\"))
+    {
+        return home_dir().join(rest);
+    }
+    PathBuf::from(value)
+}
+
+fn home_dir() -> PathBuf {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }

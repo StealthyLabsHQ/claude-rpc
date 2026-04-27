@@ -1,5 +1,35 @@
 # Changelog
 
+## v3.1.1 (2026-04-27)
+
+### Added
+- Added macOS Tauri build output with `.app`, `.dmg`, and portable arm64 binary artifacts.
+- Added macOS Claude Code and Claude Desktop process detection.
+- Added macOS Discord RPC IPC support through Unix `discord-ipc-*` sockets.
+- Added macOS start-at-login support through a LaunchAgent.
+- Added Claude account provider detection from `~/.claude.json` `oauthAccount`.
+- Added macOS Claude Desktop model fallbacks for Chat, Cowork, and Code modes.
+- Added macOS Claude Desktop Code effort detection from `ccd-effort-level`.
+
+### Changed
+- Build scripts now export platform-specific Tauri binaries and validate the signed macOS app bundle.
+- `Refresh` opens Claude Usage with the native platform URL opener.
+- Claude Code model detection now prioritizes the active session tail, including `/model` command output, before settings fallback.
+- Default detection polling is now 250 ms so Desktop model/effort switches reach Discord faster.
+
+### Fixed
+- Fixed Claude Code showing `Unknown` after `/model default` when the active JSONL session contains the model label.
+- Fixed provider showing `Unknown` for Claude Code account login on macOS.
+- Fixed Claude Desktop on macOS falling back to plain `Claude` instead of the selected model.
+- Fixed Claude Desktop `Code` mode on macOS being misclassified as `Cowork`.
+- Fixed Claude Desktop `Cowork` mode on macOS being missed when Claude stores it as `task`.
+- Fixed Claude Desktop `Cowork` model detection on macOS by reading `sticky-model-*` local storage entries.
+- Fixed Claude Desktop `Cowork` model detection preferring stale local agent sessions over the active local storage model.
+- Fixed Claude Desktop `Code` effort on macOS using CLI settings instead of the active Desktop effort value.
+- Fixed Claude Desktop `Code` model detection on macOS preferring stale Claude Code session JSONL over the active Desktop model selector.
+- Fixed macOS model detection reading stale LevelDB manifest entries before active `.ldb` / `.log` data files.
+- Added macOS parsing for readable `Adaptive` and `Extended` model markers when Claude Desktop exposes them in local storage labels.
+
 ## v3.1.0 (2026-04-27)
 
 ### Added
