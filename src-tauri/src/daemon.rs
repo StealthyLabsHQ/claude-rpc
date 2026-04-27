@@ -2,9 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Seek, SeekFrom, Write},
-    mem::size_of,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -13,6 +12,11 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(windows)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 
 #[cfg(windows)]
 use windows::{
@@ -45,7 +49,7 @@ use windows::{
 };
 
 const DEFAULT_DISCORD_CLIENT_ID: &str = "1483898157854363799";
-const SCAN_INTERVAL_MS: u64 = 1_000;
+const SCAN_INTERVAL_MS: u64 = 250;
 const RPC_REFRESH_INTERVAL_MS: u64 = 15_000;
 const IDLE_GRACE_MS: u64 = 10_000;
 const LIMITS_CACHE_MS: u64 = 6 * 60 * 60 * 1_000;
@@ -184,6 +188,13 @@ struct ProcessEntry {
     name: String,
 }
 
+#[cfg(target_os = "macos")]
+struct MacProcessEntry {
+    process_id: u32,
+    name: String,
+    command: String,
+}
+
 #[derive(Debug, Clone)]
 struct ProcessSnapshot {
     process_id: u32,
@@ -192,6 +203,7 @@ struct ProcessSnapshot {
     creation_date_ms: Option<u64>,
 }
 
+#[cfg(any(windows, test))]
 #[derive(Debug, Clone)]
 struct DesktopModelCandidate {
     model: String,
@@ -379,7 +391,7 @@ fn detect(
         None
     };
     let desktop_model = if client == ClientType::Desktop {
-        detect_desktop_model(&desktop)
+        detect_desktop_model(&desktop, session.as_ref())
     } else {
         None
     };
@@ -697,7 +709,21 @@ fn scan_claude_processes() -> Vec<ProcessSnapshot> {
         .collect()
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn scan_claude_processes() -> Vec<ProcessSnapshot> {
+    list_macos_process_entries()
+        .into_iter()
+        .filter(|entry| is_macos_claude_candidate(&entry.name, &entry.command))
+        .map(|entry| ProcessSnapshot {
+            process_id: entry.process_id,
+            name: entry.name,
+            executable_path: Some(entry.command),
+            creation_date_ms: None,
+        })
+        .collect()
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn scan_claude_processes() -> Vec<ProcessSnapshot> {
     Vec::new()
 }
@@ -708,15 +734,34 @@ fn is_desktop_process(process: &ProcessSnapshot) -> bool {
         .as_deref()
         .unwrap_or("")
         .to_ascii_lowercase();
+    let exe_unix = exe.replace('\\', "/");
     process.name.eq_ignore_ascii_case("claude desktop.exe")
+        || process.name.eq_ignore_ascii_case("claude desktop")
+        || (process.name.eq_ignore_ascii_case("claude")
+            && exe_unix.contains(".app/contents/macos/"))
         || exe.contains("windowsapps")
         || exe.contains("anthropicclaude")
         || exe.contains("\\program files\\claude")
         || exe.contains("\\appdata\\local\\anthropic")
+        || exe_unix.contains("/applications/claude.app/")
+        || exe_unix.contains("/claude.app/contents/macos/")
+        || exe_unix.contains("/library/application support/claude/")
 }
 
 fn is_code_process(process: &ProcessSnapshot) -> bool {
-    process.name.eq_ignore_ascii_case("claude.exe") && !is_desktop_process(process)
+    let exe = process
+        .executable_path
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .replace('\\', "/");
+    (process.name.eq_ignore_ascii_case("claude.exe")
+        || process.name.eq_ignore_ascii_case("claude")
+        || exe.contains("/node_modules/@anthropic-ai/claude-code/")
+        || exe.contains("/node_modules/claude-code/")
+        || exe.contains("/.claude/local/")
+        || exe.contains("/claude-code/"))
+        && !is_desktop_process(process)
 }
 
 #[cfg(windows)]
@@ -727,7 +772,7 @@ fn list_process_entries() -> Vec<ProcessEntry> {
 
     let mut entries = Vec::new();
     let mut entry = PROCESSENTRY32W::default();
-    entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
 
     if unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok() {
         loop {
@@ -800,6 +845,78 @@ fn filetime_to_unix_ms(value: FILETIME) -> Option<u64> {
     let ticks = ((value.dwHighDateTime as u64) << 32) | value.dwLowDateTime as u64;
     let ms = ticks / 10_000;
     ms.checked_sub(WINDOWS_TO_UNIX_EPOCH_MS)
+}
+
+#[cfg(target_os = "macos")]
+fn list_macos_process_entries() -> Vec<MacProcessEntry> {
+    let Ok(output) = std::process::Command::new("/bin/ps")
+        .args(["-axo", "pid=,comm=,command="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(parse_macos_process_line)
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_process_line(line: &str) -> Option<MacProcessEntry> {
+    let (process_id, rest) = split_process_field(line)?;
+    let (comm, rest) = split_process_field(rest)?;
+    let process_id = process_id.parse().ok()?;
+    let command = rest.trim_start().to_string();
+    if command.is_empty() {
+        return None;
+    }
+    Some(MacProcessEntry {
+        process_id,
+        name: command_basename(comm),
+        command,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn split_process_field(input: &str) -> Option<(&str, &str)> {
+    let input = input.trim_start();
+    if input.is_empty() {
+        return None;
+    }
+    let end = input.find(char::is_whitespace).unwrap_or(input.len());
+    Some((&input[..end], &input[end..]))
+}
+
+#[cfg(target_os = "macos")]
+fn is_macos_claude_candidate(name: &str, command: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let command = command.to_ascii_lowercase();
+    if command.contains("claude-rpc") {
+        return false;
+    }
+    name == "claude"
+        || name == "claude desktop"
+        || command.contains("/applications/claude.app/")
+        || command.contains("/claude.app/contents/macos/")
+        || command.contains("/node_modules/@anthropic-ai/claude-code/")
+        || command.contains("/node_modules/claude-code/")
+        || command.contains("/.claude/local/")
+        || command.contains("/claude-code/")
+}
+
+fn command_basename(command: &str) -> String {
+    let executable = command.split_whitespace().next().unwrap_or(command);
+    executable
+        .trim_matches('"')
+        .trim_end_matches(['\\', '/'])
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(executable)
+        .to_ascii_lowercase()
 }
 
 fn read_desktop_info(process_ids: &[u32], verbose: bool) -> DesktopInfo {
@@ -1046,8 +1163,9 @@ unsafe fn read_child_toggle_state(
     None
 }
 
-fn detect_desktop_model(info: &DesktopInfo) -> Option<String> {
+fn detect_desktop_model(info: &DesktopInfo, session: Option<&SessionInfo>) -> Option<String> {
     format_desktop_model(info)
+        .or_else(|| read_platform_desktop_model(info.mode.as_deref(), session))
         .or_else(read_settings_model)
         .or_else(|| {
             std::env::var("CLAUDE_MODEL")
@@ -1056,9 +1174,299 @@ fn detect_desktop_model(info: &DesktopInfo) -> Option<String> {
         })
 }
 
+#[cfg(target_os = "macos")]
+fn read_platform_desktop_model(
+    mode: Option<&str>,
+    session: Option<&SessionInfo>,
+) -> Option<String> {
+    match mode {
+        Some("Code") => append_desktop_effort(
+            read_sticky_model_selector().or_else(|| detect_code_model(session)),
+        ),
+        Some("Cowork") => read_cowork_sticky_model_selector()
+            .or_else(read_sticky_model_selector)
+            .or_else(read_latest_local_agent_model),
+        Some("Chat") => read_sticky_model_selector(),
+        _ => read_sticky_model_selector()
+            .or_else(read_latest_local_agent_model)
+            .or_else(|| append_code_effort(detect_code_model(session))),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_platform_desktop_model(
+    _mode: Option<&str>,
+    _session: Option<&SessionInfo>,
+) -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn read_sticky_model_selector() -> Option<String> {
+    read_desktop_local_storage_value(parse_sticky_model_selector_text)
+}
+
+#[cfg(target_os = "macos")]
+fn read_cowork_sticky_model_selector() -> Option<String> {
+    read_desktop_local_storage_value(parse_cowork_model_selector_text)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_cowork_sticky_model_selector() -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn append_desktop_effort(model: Option<String>) -> Option<String> {
+    let mut model = model?;
+    if let Some(effort) = read_desktop_effort_level() {
+        append_unique_label(&mut model, true, &effort);
+    }
+    Some(model)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn append_desktop_effort(model: Option<String>) -> Option<String> {
+    model
+}
+
+#[cfg(target_os = "macos")]
+fn read_desktop_effort_level() -> Option<String> {
+    read_desktop_local_storage_value(parse_desktop_effort_text)
+}
+
+#[cfg(target_os = "macos")]
+fn read_desktop_local_storage_value(parser: fn(&str) -> Option<String>) -> Option<String> {
+    let dir = roaming_app_data()
+        .join("Claude")
+        .join("Local Storage")
+        .join("leveldb");
+    let mut files = match fs::read_dir(dir) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                let ext = path.extension().and_then(|value| value.to_str())?;
+                if !matches!(ext, "ldb" | "log") {
+                    return None;
+                }
+                let modified = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .unwrap_or(UNIX_EPOCH);
+                Some((modified, path))
+            })
+            .collect::<Vec<_>>(),
+        Err(_) => return None,
+    };
+    files.sort_by(|left, right| right.0.cmp(&left.0));
+
+    for (_, path) in files {
+        let Ok(raw) = fs::read(&path) else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&raw);
+        if let Some(value) = parser(&text) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_desktop_local_storage_value(_parser: fn(&str) -> Option<String>) -> Option<String> {
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_sticky_model_selector() -> Option<String> {
+    None
+}
+
+fn parse_sticky_model_selector_text(raw: &str) -> Option<String> {
+    let mut model = None;
+    for marker in [
+        "sticky-model-selector",
+        "ticky-model-selector",
+        "sticky-model-",
+    ] {
+        let mut offset = 0usize;
+        while let Some(index) = raw[offset..].find(marker) {
+            let start = offset + index + marker.len();
+            let end = (start + 512).min(raw.len());
+            if let Some(candidate) = extract_first_model_id(&raw[start..end]) {
+                model = Some(append_desktop_thinking_labels(candidate, &raw[start..end]));
+            }
+            offset = start;
+        }
+    }
+    model
+}
+
+fn parse_cowork_model_selector_text(raw: &str) -> Option<String> {
+    let mut model = None;
+    for marker in [
+        "cowork-sticky-model-selector",
+        "owork-sticky-model-selector",
+    ] {
+        let mut offset = 0usize;
+        while let Some(index) = raw[offset..].find(marker) {
+            let start = offset + index + marker.len();
+            let end = (start + 512).min(raw.len());
+            if let Some(candidate) = extract_first_model_id(&raw[start..end]) {
+                model = Some(append_desktop_thinking_labels(candidate, &raw[start..end]));
+            }
+            offset = start;
+        }
+    }
+    model
+}
+
+fn parse_desktop_effort_text(raw: &str) -> Option<String> {
+    let marker = "ccd-effort-level";
+    let mut offset = 0usize;
+    let mut effort = None;
+    while let Some(index) = raw[offset..].find(marker) {
+        let start = offset + index + marker.len();
+        let end = (start + 128).min(raw.len());
+        if let Some(value) = extract_effort_label(&raw[start..end].to_ascii_lowercase()) {
+            effort = Some(value);
+        }
+        offset = start;
+    }
+    effort
+}
+
+fn append_desktop_thinking_labels(mut model: String, raw: &str) -> String {
+    let lower = raw.to_ascii_lowercase();
+    append_unique_label(&mut model, lower.contains("adaptive"), "Adaptive");
+    append_unique_label(&mut model, lower.contains("extended"), "Extended");
+    model
+}
+
+fn extract_first_model_id(raw: &str) -> Option<String> {
+    let (start, needs_prefix) = find_model_token_start(raw)?;
+    let tail = &raw[start..];
+    let id = tail
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '[' | ']'))
+        .collect::<String>();
+    let id = if needs_prefix {
+        format!("claude-{id}")
+    } else {
+        id
+    };
+    format_model_name(&id)
+}
+
+fn find_model_token_start(raw: &str) -> Option<(usize, bool)> {
+    let mut best: Option<(usize, bool)> = None;
+    for (needle, needs_prefix) in [
+        ("claude-", false),
+        ("opus-", true),
+        ("sonnet-", true),
+        ("haiku-", true),
+    ] {
+        if let Some(index) = raw.find(needle) {
+            if best
+                .as_ref()
+                .map(|(best_index, _)| index < *best_index)
+                .unwrap_or(true)
+            {
+                best = Some((index, needs_prefix));
+            }
+        }
+    }
+    best
+}
+
+#[cfg(target_os = "macos")]
+fn read_latest_local_agent_model() -> Option<String> {
+    let root = roaming_app_data()
+        .join("Claude")
+        .join("local-agent-mode-sessions");
+    let mut stack = vec![root];
+    let mut best: Option<(u64, String)> = None;
+    let mut visited = 0usize;
+
+    while let Some(dir) = stack.pop() {
+        visited += 1;
+        if visited > 10_000 {
+            break;
+        }
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+
+            let is_local_session = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(|name| name.starts_with("local_") && name.ends_with(".json"))
+                .unwrap_or(false);
+            if !is_local_session {
+                continue;
+            }
+
+            let Ok(raw) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Some(model) = desktop_model_from_local_agent_session(&raw) else {
+                continue;
+            };
+            let score = local_agent_session_timestamp(&raw).unwrap_or_else(|| {
+                entry
+                    .metadata()
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_millis() as u64)
+                    .unwrap_or(0)
+            });
+            if best
+                .as_ref()
+                .map(|(best_score, _)| score > *best_score)
+                .unwrap_or(true)
+            {
+                best = Some((score, model));
+            }
+        }
+    }
+
+    best.map(|(_, model)| model)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_latest_local_agent_model() -> Option<String> {
+    None
+}
+
+fn desktop_model_from_local_agent_session(raw: &str) -> Option<String> {
+    serde_json::from_str::<Value>(raw)
+        .ok()?
+        .get("model")
+        .and_then(Value::as_str)
+        .and_then(format_model_name)
+}
+
+fn local_agent_session_timestamp(raw: &str) -> Option<u64> {
+    let value: Value = serde_json::from_str(raw).ok()?;
+    value
+        .get("lastActivityAt")
+        .or_else(|| value.get("createdAt"))
+        .and_then(Value::as_u64)
+}
+
 fn detect_code_model(session: Option<&SessionInfo>) -> Option<String> {
-    read_settings_model()
-        .or_else(|| session.and_then(|session| session.model.clone()))
+    session
+        .and_then(|session| session.model.clone())
+        .or_else(read_settings_model)
         .or_else(|| {
             std::env::var("CLAUDE_MODEL")
                 .ok()
@@ -1114,6 +1522,7 @@ fn detect_code_effort() -> Option<String> {
     )
 }
 
+#[cfg(any(windows, test))]
 fn desktop_info_from_ui_names(names: &[String], fallback_mode: Option<&str>) -> DesktopInfo {
     let mut chat_score = 0;
     let mut cowork_score = 0;
@@ -1209,6 +1618,7 @@ fn desktop_info_from_ui_names(names: &[String], fallback_mode: Option<&str>) -> 
     }
 }
 
+#[cfg(any(windows, test))]
 fn parse_desktop_model_name(raw: &str) -> Option<DesktopModelCandidate> {
     let value = raw.trim();
     if value.is_empty() {
@@ -1305,6 +1715,7 @@ fn extract_model_version(value: &str, family: &str) -> Option<String> {
     None
 }
 
+#[cfg(any(windows, test))]
 fn default_model_version(family: &str) -> String {
     match family {
         "Haiku" => "4.5",
@@ -1329,6 +1740,7 @@ fn extract_effort_label(lower: &str) -> Option<String> {
     }
 }
 
+#[cfg(any(windows, test))]
 fn parse_usage_limits(names: &[String]) -> Vec<UsageLimitEntry> {
     let mut entries = Vec::new();
 
@@ -1356,6 +1768,7 @@ fn parse_usage_limits(names: &[String]) -> Vec<UsageLimitEntry> {
     entries
 }
 
+#[cfg(any(windows, test))]
 fn parse_used_percent(value: &str) -> Option<u8> {
     let lower = value.to_ascii_lowercase();
     if !lower.contains("used") || !lower.contains('%') {
@@ -1374,6 +1787,7 @@ fn parse_used_percent(value: &str) -> Option<u8> {
     digits.parse::<u8>().ok()
 }
 
+#[cfg(any(windows, test))]
 fn find_limit_label(names: &[String], usage_index: usize) -> Option<(String, usize)> {
     let start = usage_index.saturating_sub(12);
     for index in (start..usage_index).rev() {
@@ -1389,6 +1803,7 @@ fn find_limit_label(names: &[String], usage_index: usize) -> Option<(String, usi
     None
 }
 
+#[cfg(any(windows, test))]
 fn find_limit_reset(names: &[String], label_index: usize, usage_index: usize) -> Option<String> {
     names
         .iter()
@@ -1549,6 +1964,7 @@ fn sort_limit_entries(entries: &mut Vec<UsageLimitEntry>) {
     });
 }
 
+#[cfg(windows)]
 fn write_ui_debug(names: &[String], info: &DesktopInfo) -> Option<String> {
     let path = app_dir().join("ui-debug.json");
     write_status(
@@ -1575,42 +1991,83 @@ fn detect_provider() -> String {
             .ok()
             .or_else(|| settings_env.get(key).cloned())
     };
+    let has_value = |key: &str| is_present(lookup(key).as_deref());
 
-    if is_truthy(lookup("CLAUDE_CODE_USE_BEDROCK").as_deref()) {
+    if is_truthy(lookup("CLAUDE_CODE_USE_BEDROCK").as_deref())
+        || has_value("ANTHROPIC_BEDROCK_BASE_URL")
+        || has_value("AWS_BEARER_TOKEN_BEDROCK")
+    {
         "Amazon Bedrock".into()
-    } else if is_truthy(lookup("CLAUDE_CODE_USE_VERTEX").as_deref()) {
+    } else if is_truthy(lookup("CLAUDE_CODE_USE_VERTEX").as_deref())
+        || has_value("ANTHROPIC_VERTEX_PROJECT_ID")
+    {
         "Google GCP Vertex".into()
     } else if is_truthy(lookup("CLAUDE_CODE_USE_FOUNDRY").as_deref()) {
         "Microsoft Foundry".into()
-    } else if lookup("ANTHROPIC_API_KEY").is_some() || lookup("CLAUDE_API_KEY").is_some() {
+    } else if has_value("ANTHROPIC_API_KEY") || has_value("CLAUDE_API_KEY") {
         "Anthropic API".into()
-    } else if fs::read_to_string(claude_dir().join("config.json"))
-        .map(|raw| raw.contains("\"sk-ant-"))
-        .unwrap_or(false)
-    {
-        "Anthropic API".into()
-    } else if fs::read_to_string(claude_dir().join(".credentials.json"))
-        .map(|raw| raw.contains("\"claudeAiOauth\""))
-        .unwrap_or(false)
-    {
-        "Claude Account".into()
     } else {
-        "Unknown".into()
+        let config_texts = claude_config_texts();
+        if config_texts.iter().any(|raw| has_anthropic_api_auth(raw)) {
+            "Anthropic API".into()
+        } else if config_texts.iter().any(|raw| has_claude_account_auth(raw)) {
+            "Claude Account".into()
+        } else {
+            "Unknown".into()
+        }
     }
 }
 
+fn is_present(value: Option<&str>) -> bool {
+    value.map(|value| !value.trim().is_empty()).unwrap_or(false)
+}
+
 fn read_settings_env() -> HashMap<String, String> {
-    let raw = match fs::read_to_string(claude_dir().join("settings.json")) {
+    let mut result = HashMap::new();
+    read_settings_env_file(&claude_dir().join("settings.json"), &mut result);
+    read_settings_env_file(&claude_dir().join("settings.local.json"), &mut result);
+    result
+}
+
+fn read_settings_env_file(path: &Path, result: &mut HashMap<String, String>) {
+    let raw = match fs::read_to_string(path) {
         Ok(raw) => raw,
-        Err(_) => return HashMap::new(),
+        Err(_) => return,
     };
     let value: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
     let Some(env) = value.get("env").and_then(Value::as_object) else {
-        return HashMap::new();
+        return;
     };
-    env.iter()
-        .filter_map(|(key, value)| value.as_str().map(|value| (key.clone(), value.to_string())))
+    result.extend(
+        env.iter().filter_map(|(key, value)| {
+            value.as_str().map(|value| (key.clone(), value.to_string()))
+        }),
+    );
+}
+
+fn claude_config_texts() -> Vec<String> {
+    let mut paths = vec![
+        claude_dir().join("config.json"),
+        claude_dir().join(".credentials.json"),
+        claude_dir().join("settings.json"),
+        claude_dir().join("settings.local.json"),
+    ];
+    paths.push(home_dir().join(".claude.json"));
+
+    paths
+        .into_iter()
+        .filter_map(|path| fs::read_to_string(path).ok())
         .collect()
+}
+
+fn has_anthropic_api_auth(raw: &str) -> bool {
+    raw.contains("sk-ant-") || raw.contains("\"apiKeyHelper\"")
+}
+
+fn has_claude_account_auth(raw: &str) -> bool {
+    raw.contains("\"claudeAiOauth\"")
+        || raw.contains("\"oauthAccount\"")
+        || raw.contains("\"CLAUDE_CODE_OAUTH_TOKEN\"")
 }
 
 fn read_session_info() -> Option<SessionInfo> {
@@ -1704,23 +2161,76 @@ fn read_session_tail(path: &Path) -> Option<String> {
         Some(lines) => lines,
         None => return None,
     };
-    let mut model = None;
     for line in lines.iter().rev() {
         let Ok(entry) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        if model.is_none() {
-            model = entry
-                .get("message")
-                .and_then(|message| message.get("model"))
-                .and_then(Value::as_str)
-                .and_then(format_model_name);
+        if let Some(model) = read_command_model(&entry) {
+            return Some(model);
         }
-        if model.is_some() {
-            break;
+        if let Some(model) = entry
+            .get("message")
+            .and_then(|message| message.get("model"))
+            .and_then(Value::as_str)
+            .and_then(format_model_name)
+        {
+            return Some(model);
         }
     }
-    model
+    None
+}
+
+fn read_command_model(entry: &Value) -> Option<String> {
+    let content = entry.get("message")?.get("content")?;
+    if let Some(text) = content.as_str() {
+        return parse_command_model_text(text);
+    }
+    content.as_array()?.iter().find_map(|item| {
+        item.get("text")
+            .and_then(Value::as_str)
+            .and_then(parse_command_model_text)
+    })
+}
+
+fn parse_command_model_text(text: &str) -> Option<String> {
+    let cleaned = strip_ansi(text)
+        .replace("<local-command-stdout>", " ")
+        .replace("</local-command-stdout>", " ")
+        .replace("<command-name>", " ")
+        .replace("</command-name>", " ")
+        .replace("<command-message>", " ")
+        .replace("</command-message>", " ")
+        .replace("<command-args>", " ")
+        .replace("</command-args>", " ");
+    let marker = "set model to ";
+    let lower = cleaned.to_ascii_lowercase();
+    let start = lower.find(marker)? + marker.len();
+    let raw = cleaned[start..]
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .replace("(default)", "")
+        .trim()
+        .to_string();
+    format_model_name(&raw)
+}
+
+fn strip_ansi(value: &str) -> String {
+    let mut output = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
 }
 
 fn detect_project_name(session_file: &Path) -> Option<String> {
@@ -1760,24 +2270,53 @@ fn read_tail_lines(path: &Path, max_bytes: u64) -> Option<Vec<String>> {
 }
 
 struct DiscordIpc {
-    file: File,
+    connection: IpcConnection,
     username: Option<String>,
     nonce: u64,
 }
 
+enum IpcConnection {
+    #[cfg(windows)]
+    File(File),
+    #[cfg(unix)]
+    Unix(UnixStream),
+}
+
+impl Read for IpcConnection {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            #[cfg(windows)]
+            Self::File(file) => file.read(buf),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.read(buf),
+        }
+    }
+}
+
+impl Write for IpcConnection {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            #[cfg(windows)]
+            Self::File(file) => file.write(buf),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            #[cfg(windows)]
+            Self::File(file) => file.flush(),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.flush(),
+        }
+    }
+}
+
 impl DiscordIpc {
     fn connect(client_id: &str) -> std::io::Result<Self> {
-        let mut file = None;
-        for id in 0..10 {
-            let path = format!(r"\\?\pipe\discord-ipc-{id}");
-            if let Ok(candidate) = OpenOptions::new().read(true).write(true).open(path) {
-                file = Some(candidate);
-                break;
-            }
-        }
         let mut client = Self {
-            file: file
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "discord ipc"))?,
+            connection: connect_discord_ipc()?,
             username: None,
             nonce: 0,
         };
@@ -1841,16 +2380,17 @@ impl DiscordIpc {
 
     fn send_frame(&mut self, opcode: u32, payload: &Value) -> std::io::Result<()> {
         let data = serde_json::to_vec(payload)?;
-        self.file.write_all(&opcode.to_le_bytes())?;
-        self.file.write_all(&(data.len() as u32).to_le_bytes())?;
-        self.file.write_all(&data)?;
-        self.file.flush()
+        self.connection.write_all(&opcode.to_le_bytes())?;
+        self.connection
+            .write_all(&(data.len() as u32).to_le_bytes())?;
+        self.connection.write_all(&data)?;
+        self.connection.flush()
     }
 
     fn read_frame(&mut self) -> std::io::Result<Value> {
         loop {
             let mut header = [0u8; 8];
-            self.file.read_exact(&mut header)?;
+            self.connection.read_exact(&mut header)?;
             let opcode = u32::from_le_bytes(header[0..4].try_into().unwrap());
             let len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
             if len > 1024 * 1024 {
@@ -1860,7 +2400,7 @@ impl DiscordIpc {
                 ));
             }
             let mut payload = vec![0u8; len];
-            self.file.read_exact(&mut payload)?;
+            self.connection.read_exact(&mut payload)?;
             let value: Value = serde_json::from_slice(&payload)?;
             match opcode {
                 1 => return Ok(value),
@@ -1880,6 +2420,57 @@ impl DiscordIpc {
     }
 }
 
+#[cfg(windows)]
+fn connect_discord_ipc() -> std::io::Result<IpcConnection> {
+    for id in 0..10 {
+        let path = format!(r"\\?\pipe\discord-ipc-{id}");
+        if let Ok(candidate) = OpenOptions::new().read(true).write(true).open(path) {
+            return Ok(IpcConnection::File(candidate));
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "discord ipc",
+    ))
+}
+
+#[cfg(unix)]
+fn connect_discord_ipc() -> std::io::Result<IpcConnection> {
+    for base in discord_ipc_roots() {
+        for id in 0..10 {
+            let path = base.join(format!("discord-ipc-{id}"));
+            if let Ok(stream) = UnixStream::connect(path) {
+                return Ok(IpcConnection::Unix(stream));
+            }
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "discord ipc",
+    ))
+}
+
+#[cfg(unix)]
+fn discord_ipc_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for name in ["XDG_RUNTIME_DIR", "TMPDIR", "TMP", "TEMP"] {
+        if let Some(path) = std::env::var_os(name).map(PathBuf::from) {
+            push_unique_path(&mut roots, path);
+        }
+    }
+    for path in ["/tmp", "/var/tmp", "/usr/tmp"] {
+        push_unique_path(&mut roots, PathBuf::from(path));
+    }
+    roots
+}
+
+#[cfg(unix)]
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
+}
+
 fn write_status(path: &Path, value: &Value) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -1896,10 +2487,10 @@ fn clear_status(path: &Path) {
 
 fn format_model_name(model_id: &str) -> Option<String> {
     let id = model_id.trim().to_ascii_lowercase();
-    if id.is_empty() {
+    if id.is_empty() || id == "<synthetic>" || id == "synthetic" {
         return None;
     }
-    let context = if id.contains("1m") || id.contains("1m]") {
+    let context = if id.contains("1m") || id.contains("1m]") || id.contains("1m context") {
         " (1M)"
     } else {
         ""
@@ -1932,21 +2523,27 @@ fn format_model_name(model_id: &str) -> Option<String> {
     if id.contains("opus") {
         return Some(format!(
             "Claude Opus {}{}",
-            version.unwrap_or_else(|| "4.6".into()),
+            version
+                .or_else(|| extract_model_version(model_id, "Opus"))
+                .unwrap_or_else(|| "4.7".into()),
             context
         ));
     }
     if id.contains("sonnet") {
         return Some(format!(
             "Claude Sonnet {}{}",
-            version.unwrap_or_else(|| "4.6".into()),
+            version
+                .or_else(|| extract_model_version(model_id, "Sonnet"))
+                .unwrap_or_else(|| "4.6".into()),
             context
         ));
     }
     if id.contains("haiku") {
         return Some(format!(
             "Claude Haiku {}{}",
-            version.unwrap_or_else(|| "4.5".into()),
+            version
+                .or_else(|| extract_model_version(model_id, "Haiku"))
+                .unwrap_or_else(|| "4.5".into()),
             context
         ));
     }
@@ -1955,7 +2552,8 @@ fn format_model_name(model_id: &str) -> Option<String> {
 
 fn map_desktop_mode(value: &str) -> Option<String> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "epitaxy" | "cowork" => Some("Cowork".into()),
+        "cowork" | "task" => Some("Cowork".into()),
+        "epitaxy" => Some("Code".into()),
         "chat" => Some("Chat".into()),
         "code" => Some("Code".into()),
         _ => None,
@@ -2124,9 +2722,15 @@ fn app_dir() -> PathBuf {
 }
 
 fn roaming_app_data() -> PathBuf {
-    std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(home_dir)
+    if let Some(app_data) = std::env::var_os("APPDATA") {
+        return PathBuf::from(app_data);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join("Library")
+            .join("Application Support");
+    }
+    home_dir()
 }
 
 fn home_dir() -> PathBuf {
@@ -2167,28 +2771,132 @@ mod tests {
             Some("Claude Opus 4.6")
         );
         assert_eq!(
+            format_model_name("Opus 4.7 (1M context) (default)").as_deref(),
+            Some("Claude Opus 4.7 (1M)")
+        );
+        assert_eq!(
             format_model_name("claude-sonnet-4-6[1m]").as_deref(),
             Some("Claude Sonnet 4.6 (1M)")
         );
     }
 
     #[test]
+    fn parses_model_command_output() {
+        assert_eq!(
+            parse_command_model_text(
+                "<local-command-stdout>Set model to \u{1b}[1mOpus 4.7 (1M context) (default)\u{1b}[22m</local-command-stdout>"
+            )
+            .as_deref(),
+            Some("Claude Opus 4.7 (1M)")
+        );
+        assert_eq!(
+            parse_command_model_text(
+                "<local-command-stdout>Set model to \u{1b}[1mSonnet 4.6\u{1b}[22m</local-command-stdout>"
+            )
+            .as_deref(),
+            Some("Claude Sonnet 4.6")
+        );
+        assert_eq!(format_model_name("<synthetic>"), None);
+    }
+
+    #[test]
+    fn detects_provider_auth_markers() {
+        assert!(has_anthropic_api_auth(
+            r#"{"apiKeyHelper":"/usr/local/bin/anthropic-key"}"#
+        ));
+        assert!(has_anthropic_api_auth(r#"{"key":"sk-ant-redacted"}"#));
+        assert!(has_claude_account_auth(
+            r#"{"oauthAccount":{"email":"user@example.com"}}"#
+        ));
+        assert!(has_claude_account_auth(r#"{"claudeAiOauth":{}}"#));
+        assert!(!is_present(Some("  ")));
+    }
+
+    #[test]
+    fn parses_macos_desktop_model_sources() {
+        assert_eq!(
+            parse_sticky_model_selector_text(
+                "\0_https://claude.ai\0sticky-model-selector\0claude-opus-4-7[1m]\0"
+            )
+            .as_deref(),
+            Some("Claude Opus 4.7 (1M)")
+        );
+        assert_eq!(
+            parse_sticky_model_selector_text(
+                "\0sticky-model-selector\0claude-sonnet-4-6\0_https://claude.ai"
+            )
+            .as_deref(),
+            Some("Claude Sonnet 4.6")
+        );
+        assert_eq!(
+            parse_sticky_model_selector_text("en-US\0ticky-model-selector\0claude-opus-4-7\0")
+                .as_deref(),
+            Some("Claude Opus 4.7")
+        );
+        assert_eq!(
+            parse_sticky_model_selector_text(
+                "sticky-model-\u{001d}or\u{0001}P-sonnet-4-6\u{0014}\u{0015}default\u{0009}opus-4-7"
+            )
+            .as_deref(),
+            Some("Claude Sonnet 4.6")
+        );
+        assert_eq!(
+            parse_sticky_model_selector_text("sticky-model-selector\0claude-opus-4-7\0Adaptive")
+                .as_deref(),
+            Some("Claude Opus 4.7 | Adaptive")
+        );
+        assert_eq!(
+            parse_sticky_model_selector_text("sticky-model-selector\0claude-opus-4-7\0Extended")
+                .as_deref(),
+            Some("Claude Opus 4.7 | Extended")
+        );
+        assert_eq!(
+            parse_cowork_model_selector_text(
+                "cowork-sticky-model-selector\u{0001}c\u{0005}0h-opus-4-7"
+            )
+            .as_deref(),
+            Some("Claude Opus 4.7")
+        );
+        assert_eq!(
+            parse_desktop_effort_text("ccd-effort-level\u{0007}\u{0001}medium").as_deref(),
+            Some("Medium")
+        );
+        assert_eq!(
+            desktop_model_from_local_agent_session(
+                r#"{"model":"claude-sonnet-4-6","title":"Organize files"}"#
+            )
+            .as_deref(),
+            Some("Claude Sonnet 4.6")
+        );
+    }
+
+    #[test]
+    fn maps_current_macos_desktop_modes() {
+        assert_eq!(map_desktop_mode("chat").as_deref(), Some("Chat"));
+        assert_eq!(map_desktop_mode("cowork").as_deref(), Some("Cowork"));
+        assert_eq!(map_desktop_mode("task").as_deref(), Some("Cowork"));
+        assert_eq!(map_desktop_mode("epitaxy").as_deref(), Some("Code"));
+    }
+
+    #[test]
     fn parses_desktop_model_labels() {
-        let candidate = parse_desktop_model_name("Claude Opus 4.7 1M Adaptive Extra high")
+        let candidate = parse_desktop_model_name("Claude Opus 4.7 1M Adaptive Extended Extra high")
             .expect("desktop model");
         assert_eq!(candidate.model, "Claude Opus 4.7 (1M)");
         assert!(candidate.adaptive);
+        assert!(candidate.extended);
         assert_eq!(candidate.effort.as_deref(), Some("Extra high"));
 
         let label = format_desktop_model(&DesktopInfo {
             model: Some(candidate.model),
             adaptive: candidate.adaptive,
+            extended: candidate.extended,
             effort: candidate.effort,
             ..DesktopInfo::default()
         });
         assert_eq!(
             label.as_deref(),
-            Some("Claude Opus 4.7 (1M) | Adaptive | Extra high")
+            Some("Claude Opus 4.7 (1M) | Adaptive | Extended | Extra high")
         );
     }
 
