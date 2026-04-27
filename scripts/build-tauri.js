@@ -10,8 +10,11 @@ function run(command, args) {
   const res = spawnSync(command, args, {
     cwd: ROOT,
     stdio: 'inherit',
-    shell: false,
+    shell: process.platform === 'win32',
   });
+  if (res.error) {
+    console.error(`Failed to run ${command}: ${res.error.message}`);
+  }
   if (res.status !== 0) process.exit(res.status ?? 1);
 }
 
