@@ -20,7 +20,11 @@ jobs:
           node-version: 22
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - name: Set up Rust 1.88.0
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
 
       - name: Install NSIS
         shell: pwsh
