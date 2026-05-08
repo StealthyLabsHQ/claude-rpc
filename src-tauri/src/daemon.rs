@@ -133,6 +133,7 @@ struct DetectionResult {
     debug_line: Option<String>,
     provider: String,
     project_name: Option<String>,
+    session_title: Option<String>,
     code_instances: usize,
     started_at_ms: Option<u64>,
 }
@@ -148,6 +149,7 @@ impl Default for DetectionResult {
             debug_line: None,
             provider: "Unknown".into(),
             project_name: None,
+            session_title: None,
             code_instances: 0,
             started_at_ms: None,
         }
@@ -171,6 +173,7 @@ struct SessionInfo {
     file: PathBuf,
     started_at_ms: Option<u64>,
     project_name: Option<String>,
+    session_title: Option<String>,
     model: Option<String>,
 }
 
@@ -180,6 +183,8 @@ struct StateMachine {
     last_non_idle_at_ms: u64,
     cached_limits: Vec<UsageLimitEntry>,
     cached_limits_at_ms: u64,
+    oauth_last_attempt_ms: u64,
+    oauth_backoff_until_ms: u64,
 }
 
 #[cfg(windows)]
@@ -411,6 +416,9 @@ fn detect(
         project_name: session
             .as_ref()
             .and_then(|session| session.project_name.clone()),
+        session_title: session
+            .as_ref()
+            .and_then(|session| session.session_title.clone()),
         code_instances: code_count,
         started_at_ms: oldest
             .or_else(|| session.as_ref().and_then(|session| session.started_at_ms)),
@@ -494,6 +502,17 @@ fn build_details(result: &DetectionResult, mode: &str) -> String {
     }
 
     if result.client == ClientType::Code {
+        if let Some(title) = sanitize_field(result.session_title.as_deref(), 64) {
+            let candidate = format!("{base} - {title}");
+            if candidate.len() <= 96 {
+                return candidate;
+            }
+            if base.len() + 5 < 96 {
+                let budget = 96 - base.len() - 5;
+                let trimmed: String = title.chars().take(budget).collect();
+                return format!("{base} - {trimmed}…");
+            }
+        }
         if let Some(repo) = sanitize_field(result.project_name.as_deref(), 32) {
             let candidate = format!("{base} - {repo}");
             if candidate.len() <= 96 {
@@ -1876,6 +1895,15 @@ fn current_limits(
         return machine.cached_limits.clone();
     }
 
+    if let Some(oauth_limits) = maybe_fetch_oauth_limits(machine, now) {
+        if !oauth_limits.is_empty() {
+            machine.cached_limits = merge_limit_entries(&machine.cached_limits, &oauth_limits);
+            machine.cached_limits_at_ms = now;
+            write_limits_cache(now, &machine.cached_limits);
+            return machine.cached_limits.clone();
+        }
+    }
+
     if !machine.cached_limits.is_empty()
         && now.saturating_sub(machine.cached_limits_at_ms) <= LIMITS_CACHE_MS
     {
@@ -1883,6 +1911,105 @@ fn current_limits(
     }
 
     Vec::new()
+}
+
+const OAUTH_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+const OAUTH_USAGE_BETA: &str = "oauth-2025-04-20";
+const OAUTH_USAGE_POLL_MS: u64 = 10 * 60 * 1000;
+const OAUTH_USAGE_BACKOFF_MS: u64 = 30 * 60 * 1000;
+
+fn maybe_fetch_oauth_limits(machine: &mut StateMachine, now: u64) -> Option<Vec<UsageLimitEntry>> {
+    if now < machine.oauth_backoff_until_ms {
+        return None;
+    }
+    if machine.oauth_last_attempt_ms != 0
+        && now.saturating_sub(machine.oauth_last_attempt_ms) < OAUTH_USAGE_POLL_MS
+    {
+        return None;
+    }
+    machine.oauth_last_attempt_ms = now;
+    match fetch_oauth_usage() {
+        Ok(entries) => Some(entries),
+        Err(OAuthFetchError::RateLimited) => {
+            machine.oauth_backoff_until_ms = now + OAUTH_USAGE_BACKOFF_MS;
+            None
+        }
+        Err(_) => None,
+    }
+}
+
+enum OAuthFetchError {
+    NoToken,
+    Network,
+    RateLimited,
+    Parse,
+}
+
+fn fetch_oauth_usage() -> Result<Vec<UsageLimitEntry>, OAuthFetchError> {
+    let token = read_oauth_access_token().ok_or(OAuthFetchError::NoToken)?;
+    let response = ureq::get(OAUTH_USAGE_URL)
+        .timeout(std::time::Duration::from_secs(8))
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("anthropic-beta", OAUTH_USAGE_BETA)
+        .set("User-Agent", "claude-rpc")
+        .call();
+    let body = match response {
+        Ok(resp) => resp.into_string().map_err(|_| OAuthFetchError::Parse)?,
+        Err(ureq::Error::Status(429, _)) => return Err(OAuthFetchError::RateLimited),
+        Err(_) => return Err(OAuthFetchError::Network),
+    };
+    let value: Value = serde_json::from_str(&body).map_err(|_| OAuthFetchError::Parse)?;
+    Ok(parse_oauth_usage_response(&value))
+}
+
+fn read_oauth_access_token() -> Option<String> {
+    let path = claude_dir().join(".credentials.json");
+    let raw = fs::read_to_string(&path).ok()?;
+    let value: Value = serde_json::from_str(raw.trim_start_matches('\u{feff}')).ok()?;
+    let oauth = value.get("claudeAiOauth")?;
+    let token = oauth.get("accessToken").and_then(Value::as_str)?;
+    if let Some(expires_at) = oauth.get("expiresAt").and_then(Value::as_u64) {
+        if expires_at < now_ms() {
+            return None;
+        }
+    }
+    Some(token.to_string())
+}
+
+fn parse_oauth_usage_response(body: &Value) -> Vec<UsageLimitEntry> {
+    let mut entries = Vec::new();
+    let buckets = [
+        ("five_hour", "5h"),
+        ("seven_day", "All"),
+        ("seven_day_opus", "Opus"),
+    ];
+    for (key, label) in buckets {
+        let Some(bucket) = body.get(key) else { continue };
+        let Some(util) = bucket
+            .get("utilization")
+            .and_then(Value::as_f64)
+            .or_else(|| {
+                bucket
+                    .get("percent_used")
+                    .and_then(Value::as_f64)
+                    .map(|v| v / 100.0)
+            })
+        else {
+            continue;
+        };
+        let percent = (util * 100.0).round().clamp(0.0, 255.0) as u8;
+        let reset = bucket
+            .get("resets_at")
+            .and_then(Value::as_str)
+            .or_else(|| bucket.get("reset_at").and_then(Value::as_str))
+            .map(String::from);
+        entries.push(UsageLimitEntry {
+            label: label.into(),
+            used_percent: percent,
+            reset,
+        });
+    }
+    entries
 }
 
 fn write_limits_cache(updated_at: u64, limits: &[UsageLimitEntry]) {
@@ -2074,22 +2201,53 @@ fn read_session_info() -> Option<SessionInfo> {
     let file = find_latest_jsonl_file(&claude_dir().join("projects"), 24 * 60 * 60 * 1000)?;
     let started_at_ms = read_session_start_ms(&file);
     let project_name = detect_project_name(&file);
+    let session_title = read_session_title(&file);
     let model = read_session_tail(&file);
     Some(SessionInfo {
         file,
         started_at_ms,
         project_name,
+        session_title,
         model,
     })
 }
 
+fn read_session_title(path: &Path) -> Option<String> {
+    let lines = read_tail_lines(path, 256 * 1024)?;
+    for line in lines.iter().rev() {
+        if !line.contains("\"ai-title\"") {
+            continue;
+        }
+        let entry: Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if entry.get("type").and_then(Value::as_str) != Some("ai-title") {
+            continue;
+        }
+        if let Some(title) = entry.get("aiTitle").and_then(Value::as_str) {
+            return sanitize_field(Some(title), 96);
+        }
+    }
+    None
+}
+
 fn find_latest_jsonl_file(root: &Path, max_age_ms: u64) -> Option<PathBuf> {
+    let mut candidates = collect_jsonl_candidates(root, max_age_ms);
+    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    candidates
+        .into_iter()
+        .find(|(path, _)| is_user_session_file(path))
+        .map(|(path, _)| path)
+}
+
+fn collect_jsonl_candidates(root: &Path, max_age_ms: u64) -> Vec<(PathBuf, u64)> {
     fn walk(
         dir: &Path,
         depth: usize,
         now: u64,
         max_age_ms: u64,
-        best: &mut Option<(PathBuf, u64)>,
+        out: &mut Vec<(PathBuf, u64)>,
     ) {
         if depth > 3 {
             return;
@@ -2105,7 +2263,7 @@ fn find_latest_jsonl_file(root: &Path, max_age_ms: u64) -> Option<PathBuf> {
                 Err(_) => continue,
             };
             if file_type.is_dir() {
-                walk(&path, depth + 1, now, max_age_ms, best);
+                walk(&path, depth + 1, now, max_age_ms, out);
                 continue;
             }
             if !file_type.is_file()
@@ -2119,19 +2277,46 @@ fn find_latest_jsonl_file(root: &Path, max_age_ms: u64) -> Option<PathBuf> {
             if now.saturating_sub(mtime) > max_age_ms {
                 continue;
             }
-            if best
-                .as_ref()
-                .map(|(_, best_time)| mtime > *best_time)
-                .unwrap_or(true)
-            {
-                *best = Some((path, mtime));
-            }
+            out.push((path, mtime));
         }
     }
 
-    let mut best = None;
-    walk(root, 0, now_ms(), max_age_ms, &mut best);
-    best.map(|(path, _)| path)
+    let mut out = Vec::new();
+    walk(root, 0, now_ms(), max_age_ms, &mut out);
+    out
+}
+
+fn is_user_session_file(path: &Path) -> bool {
+    match read_session_cwd(path) {
+        Some(cwd) => is_user_project_cwd(&cwd),
+        // No cwd readable yet (very fresh file) — assume valid; tail-based detection will refine
+        None => true,
+    }
+}
+
+fn read_session_cwd(path: &Path) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let mut buf = vec![0; 32 * 1024];
+    let len = file.read(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf[..len]);
+    for line in text.lines().take(20) {
+        let entry: Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if let Some(cwd) = entry.get("cwd").and_then(Value::as_str) {
+            return Some(cwd.to_string());
+        }
+    }
+    None
+}
+
+fn is_user_project_cwd(cwd: &str) -> bool {
+    // Reject sessions whose cwd lives inside a hidden directory (e.g. C:\Users\x\.claude-mem\...)
+    // Background subagents/observers run from these; real Claude Code sessions don't.
+    cwd.split(|c| c == '/' || c == '\\')
+        .filter(|seg| !seg.is_empty())
+        .all(|seg| !seg.starts_with('.') || seg.chars().all(|c| c == '.'))
 }
 
 fn read_session_start_ms(path: &Path) -> Option<u64> {
@@ -2161,12 +2346,28 @@ fn read_session_tail(path: &Path) -> Option<String> {
         Some(lines) => lines,
         None => return None,
     };
+    // Pass 1: latest "/model" command anywhere — user-set model wins
     for line in lines.iter().rev() {
         let Ok(entry) = serde_json::from_str::<Value>(line) else {
             continue;
         };
+        if is_sidechain_entry(&entry) {
+            continue;
+        }
         if let Some(model) = read_command_model(&entry) {
             return Some(model);
+        }
+    }
+    // Pass 2: latest assistant message.model from the main thread (skip sidechains)
+    for line in lines.iter().rev() {
+        let Ok(entry) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if is_sidechain_entry(&entry) {
+            continue;
+        }
+        if entry.get("type").and_then(Value::as_str) != Some("assistant") {
+            continue;
         }
         if let Some(model) = entry
             .get("message")
@@ -2178,6 +2379,13 @@ fn read_session_tail(path: &Path) -> Option<String> {
         }
     }
     None
+}
+
+fn is_sidechain_entry(entry: &Value) -> bool {
+    entry
+        .get("isSidechain")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn read_command_model(entry: &Value) -> Option<String> {

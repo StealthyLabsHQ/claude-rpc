@@ -1,5 +1,20 @@
 # Changelog
 
+## v3.2.0 (2026-05-08)
+
+### Added
+- AI session title in Discord RPC details for Claude Code (reads `ai-title` entry from session JSONL — e.g. `Claude Code - Build Claude RPC app with diagnostics`).
+- Automatic Claude Pro/Max usage limits fetch via OAuth `https://api.anthropic.com/api/oauth/usage` endpoint — 5h and 7-day percentages now populate without needing Claude Desktop's Usage page open. Polls every 10 min with 30 min backoff on HTTP 429.
+
+### Fixed
+- Eliminated 1-second white window flash on app launch by creating the Settings webview lazily on first tray click instead of at startup.
+- Eliminated console window flash when toggling "Start on Windows" or opening the tray menu — `reg.exe` calls now use `CREATE_NO_WINDOW` flag.
+- Fixed false-positive Claude Sonnet 4.5 detection during idle — `read_session_tail` now skips `isSidechain: true` entries (Task subagent calls) and only considers `assistant`-type entries from the main thread.
+- Fixed brief Sonnet 4.5 flash caused by background Claude SDK observers (e.g. `claude-mem-observer-sessions`) becoming the most-recently-modified JSONL — `find_latest_jsonl_file` now rejects sessions whose `cwd` traverses a hidden directory (`.claude-mem`, etc.).
+
+### Build
+- Quoted `process.execPath` in `scripts/build-tauri.js` to fix `'C:\Program' is not recognized` when Node lives under `C:\Program Files\nodejs`.
+
 ## v3.1.1 (2026-04-27)
 
 ### Added

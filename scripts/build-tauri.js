@@ -7,7 +7,9 @@ const { spawnSync } = require('node:child_process');
 const ROOT = path.resolve(__dirname, '..');
 
 function run(command, args) {
-  const res = spawnSync(command, args, {
+  // Quote command on Windows to handle spaces in paths (e.g. C:\Program Files\nodejs\node.exe)
+  const cmd = process.platform === 'win32' ? `"${command}"` : command;
+  const res = spawnSync(cmd, args, {
     cwd: ROOT,
     stdio: 'inherit',
     shell: process.platform === 'win32',

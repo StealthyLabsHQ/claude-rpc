@@ -269,7 +269,6 @@ fn main() {
             refresh_limits
         ])
         .setup(|app| {
-            keep_window_in_tray(app);
             let handle = app.handle().clone();
             let state = app.state::<DaemonState>();
             start_daemon_inner(&handle, &state);
@@ -278,18 +277,6 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("failed to run Claude RPC tray");
-}
-
-fn keep_window_in_tray(app: &mut tauri::App) {
-    if let Some(window) = app.get_webview_window("main") {
-        let window_to_hide = window.clone();
-        window.on_window_event(move |event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window_to_hide.hide();
-            }
-        });
-    }
 }
 
 fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
@@ -434,6 +421,26 @@ fn show_settings(app: &tauri::AppHandle) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+        return;
+    }
+    if let Ok(window) = tauri::WebviewWindowBuilder::new(
+        app,
+        "main",
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .title("Claude RPC Settings")
+    .inner_size(790.0, 920.0)
+    .min_inner_size(680.0, 820.0)
+    .resizable(true)
+    .build()
+    {
+        let window_to_hide = window.clone();
+        window.on_window_event(move |event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window_to_hide.hide();
+            }
+        });
     }
 }
 
@@ -500,9 +507,14 @@ fn startup_menu_label() -> &'static str {
 }
 
 #[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+#[cfg(windows)]
 fn is_start_on_windows_enabled() -> bool {
+    use std::os::windows::process::CommandExt;
     std::process::Command::new("reg.exe")
         .args(["query", STARTUP_REG_KEY, "/v", STARTUP_REG_VALUE])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
@@ -586,8 +598,10 @@ fn set_start_on_windows(_enabled: bool) -> Result<(), String> {
 
 #[cfg(windows)]
 fn run_reg(args: &[&str]) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
     let output = std::process::Command::new("reg.exe")
         .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|err| err.to_string())?;
     if output.status.success() {
