@@ -20,7 +20,7 @@ jobs:
           node-version: 22
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@4d7dcb42de10c7beb90647f240577ce9fafe6f67 # v1.86.0
+      - uses: dtolnay/rust-toolchain@1.86.0
 
       - name: Install NSIS
         shell: pwsh
