@@ -185,6 +185,8 @@ struct StateMachine {
     cached_limits_at_ms: u64,
     oauth_last_attempt_ms: u64,
     oauth_backoff_until_ms: u64,
+    last_session_mtime: u64,
+    pending_activity_refresh: bool,
 }
 
 #[cfg(windows)]
@@ -389,6 +391,14 @@ fn detect(
     } else {
         DesktopInfo::default()
     };
+    if let Some(session) = &session {
+        if let Some(mtime) = modified_ms(&session.file) {
+            if machine.last_session_mtime != 0 && mtime != machine.last_session_mtime {
+                machine.pending_activity_refresh = true;
+            }
+            machine.last_session_mtime = mtime;
+        }
+    }
     let limits = current_limits(machine, &desktop.limits);
     let limits_line = if limit_visibility.enabled {
         limits_line(&limits, limit_visibility)
@@ -1915,19 +1925,27 @@ fn current_limits(
 
 const OAUTH_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const OAUTH_USAGE_BETA: &str = "oauth-2025-04-20";
-const OAUTH_USAGE_POLL_MS: u64 = 10 * 60 * 1000;
-const OAUTH_USAGE_BACKOFF_MS: u64 = 30 * 60 * 1000;
+const OAUTH_USAGE_IDLE_POLL_MS: u64 = 10 * 60 * 1000;
+const OAUTH_USAGE_ACTIVITY_POLL_MS: u64 = 60 * 1000;
+const OAUTH_USAGE_BACKOFF_MS: u64 = 5 * 60 * 1000;
 
 fn maybe_fetch_oauth_limits(machine: &mut StateMachine, now: u64) -> Option<Vec<UsageLimitEntry>> {
     if now < machine.oauth_backoff_until_ms {
+        machine.pending_activity_refresh = false;
         return None;
     }
+    let min_interval = if machine.pending_activity_refresh {
+        OAUTH_USAGE_ACTIVITY_POLL_MS
+    } else {
+        OAUTH_USAGE_IDLE_POLL_MS
+    };
     if machine.oauth_last_attempt_ms != 0
-        && now.saturating_sub(machine.oauth_last_attempt_ms) < OAUTH_USAGE_POLL_MS
+        && now.saturating_sub(machine.oauth_last_attempt_ms) < min_interval
     {
         return None;
     }
     machine.oauth_last_attempt_ms = now;
+    machine.pending_activity_refresh = false;
     match fetch_oauth_usage() {
         Ok(entries) => Some(entries),
         Err(OAuthFetchError::RateLimited) => {
@@ -1959,7 +1977,19 @@ fn fetch_oauth_usage() -> Result<Vec<UsageLimitEntry>, OAuthFetchError> {
         Err(_) => return Err(OAuthFetchError::Network),
     };
     let value: Value = serde_json::from_str(&body).map_err(|_| OAuthFetchError::Parse)?;
+    write_oauth_debug(&value);
     Ok(parse_oauth_usage_response(&value))
+}
+
+fn write_oauth_debug(body: &Value) {
+    let path = app_dir().join("oauth-usage-debug.json");
+    write_status(
+        &path,
+        &json!({
+            "fetchedAt": now_ms(),
+            "body": body,
+        }),
+    );
 }
 
 fn read_oauth_access_token() -> Option<String> {
@@ -1981,23 +2011,14 @@ fn parse_oauth_usage_response(body: &Value) -> Vec<UsageLimitEntry> {
     let buckets = [
         ("five_hour", "5h"),
         ("seven_day", "All"),
-        ("seven_day_opus", "Opus"),
+        ("seven_day_sonnet", "Sonnet only"),
+        ("seven_day_omelette", "Design"),
     ];
     for (key, label) in buckets {
         let Some(bucket) = body.get(key) else { continue };
-        let Some(util) = bucket
-            .get("utilization")
-            .and_then(Value::as_f64)
-            .or_else(|| {
-                bucket
-                    .get("percent_used")
-                    .and_then(Value::as_f64)
-                    .map(|v| v / 100.0)
-            })
-        else {
+        let Some(percent) = extract_oauth_usage_percent(bucket) else {
             continue;
         };
-        let percent = (util * 100.0).round().clamp(0.0, 255.0) as u8;
         let reset = bucket
             .get("resets_at")
             .and_then(Value::as_str)
@@ -2010,6 +2031,24 @@ fn parse_oauth_usage_response(body: &Value) -> Vec<UsageLimitEntry> {
         });
     }
     entries
+}
+
+fn extract_oauth_usage_percent(bucket: &Value) -> Option<u8> {
+    for key in [
+        "utilization",
+        "percent_used",
+        "used_percent",
+        "usage",
+        "value",
+    ] {
+        let Some(raw) = bucket.get(key).and_then(Value::as_f64) else {
+            continue;
+        };
+        // Auto-detect: ratio (0..1) gets multiplied; percentage (>1.5) used directly
+        let pct = if raw <= 1.5 { raw * 100.0 } else { raw };
+        return Some(pct.round().clamp(0.0, 100.0) as u8);
+    }
+    None
 }
 
 fn write_limits_cache(updated_at: u64, limits: &[UsageLimitEntry]) {

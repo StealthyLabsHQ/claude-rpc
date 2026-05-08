@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.2.1 (2026-05-08)
+
+### Fixed
+- Fixed `5h 255%` saturation in OAuth usage parsing — `utilization` is returned as a percentage (e.g. `20.0`) not a 0..1 ratio. Parser now auto-detects scale.
+- Fixed missing `Sonnet only` and `Design` limit categories — corrected OAuth bucket keys to `seven_day_sonnet` and `seven_day_omelette` (verified from live API response).
+
+### Added
+- Near-real-time usage refresh: when the active session JSONL is modified (i.e. a prompt completes), an OAuth fetch is scheduled with a 60s minimum interval (down from the 10 min idle cadence). Backoff on HTTP 429 reduced to 5 min.
+- OAuth response is dumped to `~/.claude-rpc/oauth-usage-debug.json` for debugging.
+
 ## v3.2.0 (2026-05-08)
 
 ### Added
