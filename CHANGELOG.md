@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.3.1 (2026-05-14)
+
+### Added
+- **Idle presence**: new toggle in Settings → Mode — when enabled, Claude appears in Discord RPC even when no Claude Code or Claude Desktop is running. Displays usage limits if the Limits toggle is on.
+
+### Changed
+- Settings UI: "Idle presence" toggle added below DND in the Mode section.
+
 ## v3.3.0 (2026-05-14)
 
 ### Added

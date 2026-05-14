@@ -87,6 +87,8 @@ struct ClaudeConfig {
     #[serde(default = "default_show_limits")]
     show_session_title: bool,
     #[serde(default)]
+    show_idle: bool,
+    #[serde(default)]
     verbose: bool,
     #[serde(default)]
     webhook_url: Option<String>,
@@ -108,6 +110,7 @@ impl Default for ClaudeConfig {
             show_provider: default_show_limits(),
             show_effort: default_show_limits(),
             show_session_title: default_show_limits(),
+            show_idle: false,
             verbose: false,
             webhook_url: None,
             rpc_mode: default_rpc_mode(),
@@ -462,7 +465,7 @@ fn detect(
 }
 
 fn build_activity(result: &DetectionResult, config: &ClaudeConfig) -> Option<Value> {
-    if result.client == ClientType::Idle {
+    if result.client == ClientType::Idle && !config.show_idle {
         return None;
     }
 
@@ -506,7 +509,7 @@ fn build_details(result: &DetectionResult, mode: &str, config: &ClaudeConfig) ->
         (ClientType::Code, "watching") => "Watching Claude Code",
         (ClientType::Desktop, _) => "Claude Desktop",
         (ClientType::Code, _) => "Claude Code",
-        (ClientType::Idle, _) => "",
+        (ClientType::Idle, _) => "Claude",
     };
 
     if result.client == ClientType::Desktop {
@@ -626,7 +629,7 @@ fn build_status(
     // - Watching/Listening/Competing: header is "{verb} {name}", then details
     //   (bold), then state, then large_text ("Powered by Anthropic").
     let (preview_header, preview_primary, preview_secondary, preview_tertiary) =
-        if result.client == ClientType::Idle {
+        if result.client == ClientType::Idle && !config.show_idle {
             (None, None, None, None)
         } else {
             let mode = normalize_mode(&config.rpc_mode);
@@ -697,6 +700,7 @@ fn presence_key(result: &DetectionResult, config: &ClaudeConfig) -> String {
         "showProvider": config.show_provider,
         "showEffort": config.show_effort,
         "showSessionTitle": config.show_session_title,
+        "showIdle": config.show_idle,
         "buttons": config.buttons,
     }))
     .unwrap_or_default()

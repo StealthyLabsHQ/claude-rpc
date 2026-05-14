@@ -9,6 +9,7 @@ const presets = {
 const fields = {
   mode: document.querySelector('#rpc-mode'),
   dndToggle: document.querySelector('#dnd-toggle'),
+  idleToggle: document.querySelector('#idle-toggle'),
   providerToggle: document.querySelector('#provider-toggle'),
   effortToggle: document.querySelector('#effort-toggle'),
   sessionTitleToggle: document.querySelector('#session-title-toggle'),
@@ -55,6 +56,7 @@ function readForm() {
   return {
     ...currentConfig,
     dnd: fields.dndToggle.dataset.enabled === 'true',
+    showIdle: fields.idleToggle.dataset.enabled === 'true',
     showLimits: fields.limitsToggle.dataset.enabled === 'true',
     showLimit5h: fields.limit5hToggle.dataset.enabled === 'true',
     showLimitAll: fields.limitAllToggle.dataset.enabled === 'true',
@@ -73,6 +75,7 @@ function writeForm(config) {
   currentConfig = config || {};
   fields.mode.value = currentConfig.rpcMode || 'playing';
   syncToggle(fields.dndToggle, !!currentConfig.dnd, 'DND');
+  syncToggle(fields.idleToggle, !!currentConfig.showIdle, 'Idle', 'on', 'off');
   syncToggle(fields.providerToggle, currentConfig.showProvider !== false, 'Provider', '', '');
   syncToggle(fields.effortToggle, currentConfig.showEffort !== false, 'Effort', '', '');
   syncToggle(fields.sessionTitleToggle, currentConfig.showSessionTitle !== false, 'Session title', '', '');
@@ -305,6 +308,10 @@ fields.mode.addEventListener('change', () => {
 });
 fields.dndToggle.addEventListener('click', () => {
   syncToggle(fields.dndToggle, fields.dndToggle.dataset.enabled !== 'true', 'DND');
+  scheduleSave();
+});
+fields.idleToggle.addEventListener('click', () => {
+  syncToggle(fields.idleToggle, fields.idleToggle.dataset.enabled !== 'true', 'Idle', 'on', 'off');
   scheduleSave();
 });
 [fields.providerToggle, fields.effortToggle, fields.sessionTitleToggle].forEach((button) => {
