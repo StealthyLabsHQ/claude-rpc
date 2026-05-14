@@ -475,7 +475,7 @@ fn build_activity(result: &DetectionResult, config: &ClaudeConfig) -> Option<Val
     };
 
     let mut activity = json!({
-        "name": "Claude AI",
+        "name": "Clawd",
         "type": activity_type,
         "created_at": now_ms(),
         "instance": false,
@@ -585,7 +585,7 @@ fn small_image_text(result: &DetectionResult) -> String {
 }
 
 fn logo_image() -> String {
-    "https://raw.githubusercontent.com/StealthyLabsHQ/claude-rpc/main/logo/discord.png".into()
+    "https://raw.githubusercontent.com/StealthyLabsHQ/claude-rpc/main/logo/clawd.png".into()
 }
 
 fn activity_verb(mode: &str) -> &'static str {
@@ -621,7 +621,7 @@ fn build_status(
     };
 
     // Mirror Discord's per-activity-type card layout:
-    // - Playing (type 0): header is just the verb; the `name` ("Claude AI")
+    // - Playing (type 0): header is just the verb; the `name` ("Clawd")
     //   takes the bold line, then details, then state.
     // - Watching/Listening/Competing: header is "{verb} {name}", then details
     //   (bold), then state, then large_text ("Powered by Anthropic").
@@ -636,13 +636,13 @@ fn build_status(
             if mode == "playing" {
                 (
                     Some("Playing".to_string()),
-                    Some("Claude AI".to_string()),
+                    Some("Clawd".to_string()),
                     Some(details),
                     Some(state),
                 )
             } else {
                 (
-                    Some(format!("{verb} Claude AI")),
+                    Some(format!("{verb} Clawd")),
                     Some(details),
                     Some(state),
                     Some("Powered by Anthropic".to_string()),

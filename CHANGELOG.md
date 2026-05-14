@@ -1,5 +1,30 @@
 # Changelog
 
+## v3.3.0 (2026-05-14)
+
+### Added
+- Built-in auto-updater via `tauri-plugin-updater`: checks the latest signed GitHub release on startup, notifies in the settings window (banner) and tray menu, downloads and installs in place. Release workflow now signs the NSIS installer and publishes `latest.json`.
+- Optional `Session title` visibility toggle — controls whether the Claude Code session title (or project-name fallback) is appended to the Discord RPC details.
+- Resilient Claude Code model detection: the last detected model is cached per session so it survives the 256 KB tail-read window being filled by large attachments, with a `~/.claude.json` `lastModelUsage` fallback for fresh sessions before the first reply.
+
+### Changed
+- Discord RPC identity renamed to `Clawd` (activity name) with the Clawd mascot as the large image.
+- App, system tray, and window icons switched to the transparent Clawd mascot (`logo/clawd.ico`); the settings window header uses the Clawd mascot.
+- Settings preview now mirrors Discord's per-activity-type card layout exactly — the daemon computes the real header/primary/secondary/tertiary lines instead of the UI reconstructing them.
+- Settings window reworked: smaller default size, `RPC` labels renamed to `IPC`, collapsed-section summaries, removed the Logo (URL/asset) option, footer rebalanced.
+- README: banner image, updated feature list and versions.
+
+### Fixed
+- OAuth usage limit parsing: `utilization` is a 0..100 percentage and is no longer mistaken for a 0..1 ratio (e.g. `seven_day: 1.0` now shows `1%` instead of `100%`).
+- When `Session title` is disabled, the project-name fallback (`- repo`) is no longer appended either.
+
+### Security
+- OAuth usage response dump (`oauth-usage-debug.json`) is now gated behind the `verbose` flag instead of being written on every poll.
+- Discord IPC `read_frame` ping loop is bounded so a process squatting the `discord-ipc-*` pipe cannot keep the daemon thread spinning.
+
+### Build
+- `tauri.conf.json` gains `createUpdaterArtifacts` and the `updater` plugin config (endpoint + public key). Signing keys are supplied to CI via the `TAURI_SIGNING_PRIVATE_KEY` secret.
+
 ## v3.2.1 (2026-05-08)
 
 ### Fixed
