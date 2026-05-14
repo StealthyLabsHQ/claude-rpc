@@ -17,7 +17,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "icon": ["../logo/anthropic-rpc.ico"],
+    "icon": ["../logo/clawd.ico"],
     "createUpdaterArtifacts": true
   },
   "plugins": {
