@@ -36,14 +36,20 @@ jobs:
 
       - run: npm test
 
-      - run: npm run build
+      - name: Build (signed)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run build
 
       - name: Verify release artifacts
         shell: pwsh
         run: |
           $setup = Get-ChildItem "src-tauri\target\release\bundle\nsis" -Filter "Claude RPC_*_x64-setup.exe" | Select-Object -First 1
+          $sig = Get-ChildItem "src-tauri\target\release\bundle\nsis" -Filter "Claude RPC_*_x64-setup.exe.sig" | Select-Object -First 1
           if (!(Test-Path "bin\claude-rpc.exe")) { throw "Missing bin\claude-rpc.exe" }
           if (!$setup) { throw "Missing NSIS installer" }
+          if (!$sig) { throw "Missing updater signature (.sig)" }
           Get-FileHash "bin\claude-rpc.exe", $setup.FullName -Algorithm SHA256
 
       - name: Upload artifacts for release job
@@ -53,6 +59,7 @@ jobs:
           path: |
             bin/claude-rpc.exe
             src-tauri/target/release/bundle/nsis/Claude RPC_*_x64-setup.exe
+            src-tauri/target/release/bundle/nsis/Claude RPC_*_x64-setup.exe.sig
 
   publish-release:
     runs-on: ubuntu-latest
@@ -66,6 +73,32 @@ jobs:
           name: release-artifacts
           path: release-artifacts
 
+      - name: Generate updater manifest (latest.json)
+        run: |
+          NSIS_DIR="release-artifacts/src-tauri/target/release/bundle/nsis"
+          SETUP=$(ls "$NSIS_DIR"/Claude\ RPC_*_x64-setup.exe)
+          SIG=$(cat "$NSIS_DIR"/Claude\ RPC_*_x64-setup.exe.sig)
+          VERSION="${GITHUB_REF_NAME#v}"
+          SETUP_NAME=$(basename "$SETUP")
+          # GitHub rewrites spaces in asset filenames to dots in the download URL.
+          URL_NAME="${SETUP_NAME// /.}"
+          ASSET_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${URL_NAME}"
+          PUB_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          cat > release-artifacts/latest.json <<EOF
+          {
+            "version": "${VERSION}",
+            "notes": "See the release notes on GitHub.",
+            "pub_date": "${PUB_DATE}",
+            "platforms": {
+              "windows-x86_64": {
+                "signature": "${SIG}",
+                "url": "${ASSET_URL}"
+              }
+            }
+          }
+          EOF
+          cat release-artifacts/latest.json
+
       - name: Publish GitHub release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -74,4 +107,6 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             release-artifacts/bin/claude-rpc.exe \
             release-artifacts/src-tauri/target/release/bundle/nsis/Claude\ RPC_*_x64-setup.exe \
+            release-artifacts/src-tauri/target/release/bundle/nsis/Claude\ RPC_*_x64-setup.exe.sig \
+            release-artifacts/latest.json \
             --generate-notes

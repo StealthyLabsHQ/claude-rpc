@@ -17,6 +17,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, WindowEvent,
 };
+use tauri_plugin_updater::UpdaterExt;
 
 #[derive(Default)]
 struct DaemonState {
@@ -34,6 +35,19 @@ struct TrayMenuState {
     mode_watching: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
     mode_listening: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
     mode_competing: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
+    update: Mutex<Option<MenuItem<tauri::Wry>>>,
+}
+
+#[derive(Default)]
+struct UpdateState {
+    available: Mutex<Option<UpdateInfo>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateInfo {
+    version: String,
+    notes: String,
 }
 
 #[cfg(windows)]
@@ -53,8 +67,6 @@ struct RpcButton {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ClaudeConfig {
-    #[serde(default = "default_logo_mode")]
-    logo_mode: String,
     #[serde(default)]
     dnd: bool,
     #[serde(default = "default_show_limits")]
@@ -71,6 +83,8 @@ struct ClaudeConfig {
     show_provider: bool,
     #[serde(default = "default_show_limits")]
     show_effort: bool,
+    #[serde(default = "default_show_limits")]
+    show_session_title: bool,
     #[serde(default)]
     verbose: bool,
     #[serde(default)]
@@ -84,7 +98,6 @@ struct ClaudeConfig {
 impl Default for ClaudeConfig {
     fn default() -> Self {
         Self {
-            logo_mode: default_logo_mode(),
             dnd: false,
             show_limits: default_show_limits(),
             show_limit_5h: default_show_limits(),
@@ -93,6 +106,7 @@ impl Default for ClaudeConfig {
             show_limit_design: default_show_limits(),
             show_provider: default_show_limits(),
             show_effort: default_show_limits(),
+            show_session_title: default_show_limits(),
             verbose: false,
             webhook_url: None,
             rpc_mode: default_rpc_mode(),
@@ -111,6 +125,10 @@ struct ClaudeStatus {
     provider_line: String,
     discord_line: String,
     debug_line: Option<String>,
+    preview_header: Option<String>,
+    preview_primary: Option<String>,
+    preview_secondary: Option<String>,
+    preview_tertiary: Option<String>,
     daemon_running: bool,
     daemon_pid: Option<u32>,
     daemon_error: Option<String>,
@@ -122,10 +140,6 @@ struct DaemonStatus {
     running: bool,
     pid: Option<u32>,
     error: Option<String>,
-}
-
-fn default_logo_mode() -> String {
-    "url".into()
 }
 
 fn default_show_limits() -> bool {
@@ -204,6 +218,22 @@ fn load_status(state: tauri::State<'_, DaemonState>) -> Result<ClaudeStatus, Str
             .get("debugLine")
             .and_then(Value::as_str)
             .map(str::to_string),
+        preview_header: value
+            .get("previewHeader")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        preview_primary: value
+            .get("previewPrimary")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        preview_secondary: value
+            .get("previewSecondary")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        preview_tertiary: value
+            .get("previewTertiary")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         daemon_running: daemon.running,
         daemon_pid: daemon.pid,
         daemon_error: daemon.error,
@@ -255,10 +285,63 @@ fn open_url(url: &str) -> Result<(), String> {
     command.spawn().map(|_| ()).map_err(|err| err.to_string())
 }
 
+async fn fetch_update(app: &tauri::AppHandle) -> Result<Option<UpdateInfo>, String> {
+    let updater = app.updater().map_err(|err| err.to_string())?;
+    match updater.check().await {
+        Ok(Some(update)) => Ok(Some(UpdateInfo {
+            version: update.version.clone(),
+            notes: update.body.clone().unwrap_or_default(),
+        })),
+        Ok(None) => Ok(None),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+async fn download_and_install(app: &tauri::AppHandle) -> Result<(), String> {
+    let updater = app.updater().map_err(|err| err.to_string())?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "No update available".to_string())?;
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|err| err.to_string())?;
+    app.restart();
+}
+
+#[tauri::command]
+async fn check_update(app: tauri::AppHandle) -> Result<Option<UpdateInfo>, String> {
+    let info = fetch_update(&app).await?;
+    *app
+        .state::<UpdateState>()
+        .available
+        .lock()
+        .expect("update state mutex poisoned") = info.clone();
+    Ok(info)
+}
+
+#[tauri::command]
+fn pending_update(state: tauri::State<'_, UpdateState>) -> Option<UpdateInfo> {
+    state
+        .available
+        .lock()
+        .expect("update state mutex poisoned")
+        .clone()
+}
+
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+    download_and_install(&app).await
+}
+
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(DaemonState::default())
         .manage(TrayMenuState::default())
+        .manage(UpdateState::default())
         .invoke_handler(tauri::generate_handler![
             load_config,
             save_config,
@@ -266,17 +349,43 @@ fn main() {
             start_daemon,
             daemon_status,
             close_settings,
-            refresh_limits
+            refresh_limits,
+            check_update,
+            pending_update,
+            install_update
         ])
         .setup(|app| {
             let handle = app.handle().clone();
             let state = app.state::<DaemonState>();
             start_daemon_inner(&handle, &state);
             create_tray(app)?;
+            spawn_update_check(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("failed to run Claude RPC tray");
+}
+
+fn spawn_update_check(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let Ok(Some(info)) = fetch_update(&app).await else {
+            return;
+        };
+        *app
+            .state::<UpdateState>()
+            .available
+            .lock()
+            .expect("update state mutex poisoned") = Some(info.clone());
+        let item = app
+            .state::<TrayMenuState>()
+            .update
+            .lock()
+            .expect("tray menu mutex poisoned")
+            .clone();
+        if let Some(item) = item {
+            let _ = item.set_text(format!("Install Update v{}", info.version));
+        }
+    });
 }
 
 fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
@@ -327,6 +436,9 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let separator_1 = PredefinedMenuItem::separator(app)?;
     let separator_2 = PredefinedMenuItem::separator(app)?;
     let separator_3 = PredefinedMenuItem::separator(app)?;
+    let separator_4 = PredefinedMenuItem::separator(app)?;
+    let update_item =
+        MenuItem::with_id(app, "update", "Check for Updates", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
@@ -341,6 +453,8 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
             &mode_listening_item,
             &mode_competing_item,
             &separator_3,
+            &update_item,
+            &separator_4,
             &quit_item,
         ],
     )?;
@@ -367,6 +481,10 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .mode_competing
         .lock()
         .expect("tray menu mutex poisoned") = Some(mode_competing_item.clone());
+    *tray_state
+        .update
+        .lock()
+        .expect("tray menu mutex poisoned") = Some(update_item.clone());
 
     TrayIconBuilder::new()
         .tooltip("Claude RPC")
@@ -388,6 +506,12 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
             "mode_watching" => set_mode(app, "watching"),
             "mode_listening" => set_mode(app, "listening"),
             "mode_competing" => set_mode(app, "competing"),
+            "update" => {
+                let handle = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = download_and_install(&handle).await;
+                });
+            }
             "quit" => {
                 let state = app.state::<DaemonState>();
                 stop_daemon(&state);
@@ -429,8 +553,8 @@ fn show_settings(app: &tauri::AppHandle) {
         tauri::WebviewUrl::App("index.html".into()),
     )
     .title("Claude RPC Settings")
-    .inner_size(790.0, 920.0)
-    .min_inner_size(680.0, 820.0)
+    .inner_size(790.0, 640.0)
+    .min_inner_size(680.0, 480.0)
     .resizable(true)
     .build()
     {
@@ -729,11 +853,6 @@ fn write_config(config: &ClaudeConfig) -> Result<(), String> {
 }
 
 fn normalize_config(mut config: ClaudeConfig) -> ClaudeConfig {
-    config.logo_mode = if config.logo_mode.eq_ignore_ascii_case("asset") {
-        "asset".into()
-    } else {
-        "url".into()
-    };
     config.rpc_mode = match config.rpc_mode.trim().to_ascii_lowercase().as_str() {
         "watching" | "tv" => "watching".into(),
         "listening" => "listening".into(),

@@ -72,12 +72,47 @@ select {
   margin-bottom: 12px;
 }
 
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--primary);
+  border-radius: 10px;
+  background: var(--primary-weak);
+  font-weight: 500;
+}
+
+.update-banner[hidden] {
+  display: none;
+}
+
+.update-banner button {
+  min-width: 120px;
+}
+
 .title-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 18px;
   margin-bottom: 10px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.app-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  flex-shrink: 0;
 }
 
 h1 {
@@ -90,8 +125,7 @@ h1 {
 .status,
 #message,
 .head,
-.mode-panel p,
-.appearance-panel p {
+.mode-panel p {
   color: var(--muted);
 }
 
@@ -147,8 +181,32 @@ h1 {
   text-align: left;
 }
 
+.legend-label {
+  flex-shrink: 0;
+}
+
+.legend-summary {
+  flex: 1;
+  min-width: 0;
+  margin-left: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.panel:not(.collapsed) .legend-summary {
+  display: none;
+}
+
 .legend::after {
   content: "-";
+  margin-left: 12px;
   color: var(--muted);
   font-size: 13px;
 }
@@ -224,46 +282,25 @@ button:disabled {
   cursor: not-allowed;
 }
 
-.mode-panel,
-.appearance-panel {
+.mode-panel {
   display: grid;
   grid-template-columns: 112px minmax(0, 1fr);
   gap: 8px 16px;
   align-items: center;
 }
 
-.mode-panel .legend,
-.appearance-panel .legend {
+.mode-panel .legend {
   grid-column: 1 / -1;
   margin-bottom: 2px;
 }
 
-.mode-panel p,
-.appearance-panel p {
+.mode-panel p {
   grid-column: 2 / -1;
   max-width: 520px;
   margin: 0;
   min-width: 0;
   overflow-wrap: anywhere;
   font-size: 13px;
-}
-
-.appearance-panel label[for="logo-mode"],
-.appearance-panel #logo-mode {
-  grid-row: 2;
-}
-
-.appearance-panel #logo-mode + p {
-  grid-row: 3;
-}
-
-.appearance-panel label:not([for]),
-.appearance-panel #debug-toggle {
-  grid-row: 4;
-}
-
-.appearance-panel #debug-toggle + p {
-  grid-row: 5;
 }
 
 .toggle.active {
@@ -298,11 +335,25 @@ button:disabled {
 }
 
 .rpc-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 0;
+}
+
+.preview-activity {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.rpc-card {
   display: grid;
   grid-template-columns: 64px 1fr;
   gap: 14px;
   align-items: center;
-  padding: 8px 0;
 }
 
 .preview-icon {
@@ -334,15 +385,6 @@ button:disabled {
 .preview-copy span {
   color: var(--muted);
   font-size: 13px;
-}
-
-#preview-state::after {
-  content: attr(data-limits);
-  display: block;
-  margin-top: 2px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .preview-buttons {
@@ -455,7 +497,7 @@ body[data-theme="light"] #apply:hover:not(:disabled) {
 
 footer {
   display: grid;
-  grid-template-columns: 110px 1fr 110px 110px;
+  grid-template-columns: 1fr 110px 110px 110px;
   gap: 10px;
   align-items: center;
   margin-top: 10px;

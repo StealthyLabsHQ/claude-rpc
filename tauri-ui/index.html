@@ -11,7 +11,10 @@
     <main class="shell">
       <header class="topbar">
         <div class="title-row">
-          <h1>Claude RPC Settings</h1>
+          <div class="brand">
+            <img class="app-icon" src="./claude_logo.png" alt="" />
+            <h1>Claude RPC Settings</h1>
+          </div>
           <div class="theme-switch" aria-label="Theme">
             <button type="button" data-theme-option="dark">Dark</button>
             <button type="button" data-theme-option="system">System</button>
@@ -21,8 +24,16 @@
         <p id="status" class="status">Claude: Off</p>
       </header>
 
+      <div id="update-banner" class="update-banner" hidden>
+        <span id="update-text"></span>
+        <button type="button" id="update-now" class="primary">Update now</button>
+      </div>
+
       <section class="panel" data-section="buttons">
-        <button type="button" class="legend section-toggle" aria-expanded="true">Buttons</button>
+        <button type="button" class="legend section-toggle" aria-expanded="true">
+          <span class="legend-label">Buttons</span>
+          <span class="legend-summary"></span>
+        </button>
         <div class="grid head">
           <span>Slot</span>
           <span>Label</span>
@@ -41,8 +52,11 @@
       </section>
 
       <section class="panel mode-panel" data-section="mode">
-        <button type="button" class="legend section-toggle" aria-expanded="true">Mode</button>
-        <label for="rpc-mode">RPC mode</label>
+        <button type="button" class="legend section-toggle" aria-expanded="true">
+          <span class="legend-label">Mode</span>
+          <span class="legend-summary"></span>
+        </button>
+        <label for="rpc-mode">IPC mode</label>
         <select id="rpc-mode">
           <option value="playing">Playing</option>
           <option value="watching">Watching (TV)</option>
@@ -53,12 +67,13 @@
         <label>DND</label>
         <button type="button" id="dnd-toggle" class="toggle" aria-pressed="false">DND off</button>
         <p>Clears Discord activity while Claude detection keeps running.</p>
-        <label>RPC info</label>
+        <label>IPC info</label>
         <div class="rpc-info-controls">
           <button type="button" id="provider-toggle" class="toggle" aria-pressed="true">Provider</button>
           <button type="button" id="effort-toggle" class="toggle" aria-pressed="true">Effort</button>
+          <button type="button" id="session-title-toggle" class="toggle" aria-pressed="true">Session title</button>
         </div>
-        <p>Controls provider and effort labels in Discord RPC.</p>
+        <p>Controls provider, effort, and session title labels in Discord RPC.</p>
         <label>Limits</label>
         <div class="limit-controls">
           <button type="button" id="limits-toggle" class="toggle" aria-pressed="true">Shown</button>
@@ -68,30 +83,26 @@
           <button type="button" id="limit-design-toggle" class="toggle compact" aria-pressed="true">Design</button>
           <button type="button" id="refresh-limits" class="ghost">Refresh</button>
         </div>
-      </section>
-
-      <section class="panel appearance-panel" data-section="appearance">
-        <button type="button" class="legend section-toggle" aria-expanded="true">Appearance</button>
-        <label for="logo-mode">Logo</label>
-        <select id="logo-mode">
-          <option value="url">GitHub image URL</option>
-          <option value="asset">Discord asset</option>
-        </select>
-        <p>Use URL unless you uploaded a Discord Developer Portal asset named claude_logo.</p>
         <label>Debug</label>
         <button type="button" id="debug-toggle" class="toggle" aria-pressed="false">Debug off</button>
         <p>Writes UIAutomation dump to .claude-rpc/ui-debug.json.</p>
       </section>
 
       <section class="panel preview-panel" data-section="preview">
-        <button type="button" class="legend section-toggle" aria-expanded="true">Preview</button>
+        <button type="button" class="legend section-toggle" aria-expanded="true">
+          <span class="legend-label">Preview</span>
+          <span class="legend-summary"></span>
+        </button>
         <div class="rpc-preview">
-          <img class="preview-icon" src="./claude_logo.png" alt="" />
-          <div class="preview-copy">
-            <strong id="preview-activity">Playing Claude</strong>
-            <span id="preview-details">Claude Code</span>
-            <span id="preview-state">Auto-detect</span>
-            <div id="preview-buttons" class="preview-buttons"></div>
+          <span id="preview-activity" class="preview-activity">Playing</span>
+          <div class="rpc-card">
+            <img class="preview-icon" src="./claude_logo.png" alt="" />
+            <div class="preview-copy">
+              <strong id="preview-primary">Claude AI</strong>
+              <span id="preview-secondary">Claude Code</span>
+              <span id="preview-tertiary">Auto-detect</span>
+              <div id="preview-buttons" class="preview-buttons"></div>
+            </div>
           </div>
         </div>
       </section>
@@ -104,8 +115,8 @@
       </section>
 
       <footer>
-        <button type="button" id="clear" class="ghost">Clear</button>
         <span id="message"></span>
+        <button type="button" id="clear" class="ghost">Clear</button>
         <button type="button" id="apply">Apply</button>
         <button type="button" id="close" class="primary">Close</button>
       </footer>

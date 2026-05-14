@@ -68,8 +68,6 @@ struct RpcButton {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ClaudeConfig {
-    #[serde(default = "default_logo_mode")]
-    logo_mode: String,
     #[serde(default)]
     dnd: bool,
     #[serde(default = "default_show_limits")]
@@ -86,6 +84,8 @@ struct ClaudeConfig {
     show_provider: bool,
     #[serde(default = "default_show_limits")]
     show_effort: bool,
+    #[serde(default = "default_show_limits")]
+    show_session_title: bool,
     #[serde(default)]
     verbose: bool,
     #[serde(default)]
@@ -99,7 +99,6 @@ struct ClaudeConfig {
 impl Default for ClaudeConfig {
     fn default() -> Self {
         Self {
-            logo_mode: default_logo_mode(),
             dnd: false,
             show_limits: default_show_limits(),
             show_limit_5h: default_show_limits(),
@@ -108,6 +107,7 @@ impl Default for ClaudeConfig {
             show_limit_design: default_show_limits(),
             show_provider: default_show_limits(),
             show_effort: default_show_limits(),
+            show_session_title: default_show_limits(),
             verbose: false,
             webhook_url: None,
             rpc_mode: default_rpc_mode(),
@@ -175,6 +175,7 @@ struct SessionInfo {
     project_name: Option<String>,
     session_title: Option<String>,
     model: Option<String>,
+    cwd: Option<String>,
 }
 
 #[derive(Default)]
@@ -187,6 +188,8 @@ struct StateMachine {
     oauth_backoff_until_ms: u64,
     last_session_mtime: u64,
     pending_activity_refresh: bool,
+    cached_code_model: Option<String>,
+    cached_code_model_session: Option<PathBuf>,
 }
 
 #[cfg(windows)]
@@ -303,6 +306,7 @@ pub fn run(stop: Arc<AtomicBool>, config_path: Option<PathBuf>, status_path: Opt
             &build_status(
                 &result,
                 ipc.as_ref().and_then(|client| client.username.as_deref()),
+                &config,
             ),
         );
 
@@ -399,7 +403,7 @@ fn detect(
             machine.last_session_mtime = mtime;
         }
     }
-    let limits = current_limits(machine, &desktop.limits);
+    let limits = current_limits(machine, &desktop.limits, verbose);
     let limits_line = if limit_visibility.enabled {
         limits_line(&limits, limit_visibility)
     } else {
@@ -417,7 +421,7 @@ fn detect(
         submode: desktop.submode,
         model: match client {
             ClientType::Desktop => desktop_model,
-            ClientType::Code => detect_code_model(session.as_ref()),
+            ClientType::Code => resolve_code_model(machine, session.as_ref()),
             ClientType::Idle => None,
         },
         limits_line,
@@ -475,10 +479,10 @@ fn build_activity(result: &DetectionResult, config: &ClaudeConfig) -> Option<Val
         "type": activity_type,
         "created_at": now_ms(),
         "instance": false,
-        "details": build_details(result, &mode),
+        "details": build_details(result, &mode, config),
         "state": build_state(result, config),
         "assets": {
-            "large_image": logo_image(config),
+            "large_image": logo_image(),
             "large_text": "Powered by Anthropic",
             "small_image": "terminal_icon",
             "small_text": small_image_text(result),
@@ -496,7 +500,7 @@ fn build_activity(result: &DetectionResult, config: &ClaudeConfig) -> Option<Val
     Some(activity)
 }
 
-fn build_details(result: &DetectionResult, mode: &str) -> String {
+fn build_details(result: &DetectionResult, mode: &str, config: &ClaudeConfig) -> String {
     let base = match (result.client, mode) {
         (ClientType::Desktop, "watching") => "Watching Claude",
         (ClientType::Code, "watching") => "Watching Claude Code",
@@ -511,7 +515,7 @@ fn build_details(result: &DetectionResult, mode: &str) -> String {
         }
     }
 
-    if result.client == ClientType::Code {
+    if result.client == ClientType::Code && config.show_session_title {
         if let Some(title) = sanitize_field(result.session_title.as_deref(), 64) {
             let candidate = format!("{base} - {title}");
             if candidate.len() <= 96 {
@@ -580,15 +584,24 @@ fn small_image_text(result: &DetectionResult) -> String {
     }
 }
 
-fn logo_image(config: &ClaudeConfig) -> String {
-    if config.logo_mode.eq_ignore_ascii_case("asset") {
-        "claude_logo".into()
-    } else {
-        "https://raw.githubusercontent.com/StealthyLabsHQ/claude-rpc/main/logo/discord.png".into()
+fn logo_image() -> String {
+    "https://raw.githubusercontent.com/StealthyLabsHQ/claude-rpc/main/logo/discord.png".into()
+}
+
+fn activity_verb(mode: &str) -> &'static str {
+    match mode {
+        "watching" => "Watching",
+        "listening" => "Listening to",
+        "competing" => "Competing in",
+        _ => "Playing",
     }
 }
 
-fn build_status(result: &DetectionResult, discord_user: Option<&str>) -> Value {
+fn build_status(
+    result: &DetectionResult,
+    discord_user: Option<&str>,
+    config: &ClaudeConfig,
+) -> Value {
     let claude_line = match result.client {
         ClientType::Desktop => desktop_mode_label(result)
             .map(|mode| format!("Claude: Desktop ({mode})"))
@@ -607,6 +620,36 @@ fn build_status(result: &DetectionResult, discord_user: Option<&str>) -> Value {
         None => "Discord: RPC disabled".into(),
     };
 
+    // Mirror Discord's per-activity-type card layout:
+    // - Playing (type 0): header is just the verb; the `name` ("Claude AI")
+    //   takes the bold line, then details, then state.
+    // - Watching/Listening/Competing: header is "{verb} {name}", then details
+    //   (bold), then state, then large_text ("Powered by Anthropic").
+    let (preview_header, preview_primary, preview_secondary, preview_tertiary) =
+        if result.client == ClientType::Idle {
+            (None, None, None, None)
+        } else {
+            let mode = normalize_mode(&config.rpc_mode);
+            let verb = activity_verb(&mode);
+            let details = build_details(result, &mode, config);
+            let state = build_state(result, config);
+            if mode == "playing" {
+                (
+                    Some("Playing".to_string()),
+                    Some("Claude AI".to_string()),
+                    Some(details),
+                    Some(state),
+                )
+            } else {
+                (
+                    Some(format!("{verb} Claude AI")),
+                    Some(details),
+                    Some(state),
+                    Some("Powered by Anthropic".to_string()),
+                )
+            }
+        };
+
     json!({
         "version": 5,
         "summary": "Claude RPC",
@@ -616,6 +659,10 @@ fn build_status(result: &DetectionResult, discord_user: Option<&str>) -> Value {
         "providerLine": format!("Provider: {}", result.provider),
         "discordLine": discord_line,
         "debugLine": result.debug_line.clone(),
+        "previewHeader": preview_header,
+        "previewPrimary": preview_primary,
+        "previewSecondary": preview_secondary,
+        "previewTertiary": preview_tertiary,
     })
 }
 
@@ -642,7 +689,6 @@ fn presence_key(result: &DetectionResult, config: &ClaudeConfig) -> String {
         "project": result.project_name,
         "rpcMode": config.rpc_mode,
         "dnd": config.dnd,
-        "logoMode": config.logo_mode,
         "showLimits": config.show_limits,
         "showLimit5h": config.show_limit_5h,
         "showLimitAll": config.show_limit_all,
@@ -650,6 +696,7 @@ fn presence_key(result: &DetectionResult, config: &ClaudeConfig) -> String {
         "showLimitDesign": config.show_limit_design,
         "showProvider": config.show_provider,
         "showEffort": config.show_effort,
+        "showSessionTitle": config.show_session_title,
         "buttons": config.buttons,
     }))
     .unwrap_or_default()
@@ -677,11 +724,6 @@ fn read_config(path: &Path) -> ClaudeConfig {
 }
 
 fn normalize_config(mut config: ClaudeConfig) -> ClaudeConfig {
-    config.logo_mode = if config.logo_mode.eq_ignore_ascii_case("asset") {
-        "asset".into()
-    } else {
-        "url".into()
-    };
     config.rpc_mode = normalize_mode(&config.rpc_mode);
     config.buttons = config
         .buttons
@@ -694,10 +736,6 @@ fn normalize_config(mut config: ClaudeConfig) -> ClaudeConfig {
         .take(2)
         .collect();
     config
-}
-
-fn default_logo_mode() -> String {
-    "url".into()
 }
 
 fn default_show_limits() -> bool {
@@ -1492,6 +1530,22 @@ fn local_agent_session_timestamp(raw: &str) -> Option<u64> {
         .and_then(Value::as_u64)
 }
 
+// Hold the last model detected for a session so the RPC doesn't fall back to
+// "Auto-detect" when the assistant entry scrolls past the tail-read window
+// (e.g. after large image attachments) or before the first reply lands.
+fn resolve_code_model(machine: &mut StateMachine, session: Option<&SessionInfo>) -> Option<String> {
+    let session_file = session.map(|session| session.file.clone());
+    if machine.cached_code_model_session != session_file {
+        machine.cached_code_model = None;
+        machine.cached_code_model_session = session_file;
+    }
+    if let Some(model) = detect_code_model(session) {
+        machine.cached_code_model = Some(model.clone());
+        return Some(model);
+    }
+    machine.cached_code_model.clone()
+}
+
 fn detect_code_model(session: Option<&SessionInfo>) -> Option<String> {
     session
         .and_then(|session| session.model.clone())
@@ -1506,6 +1560,36 @@ fn detect_code_model(session: Option<&SessionInfo>) -> Option<String> {
                 .ok()
                 .and_then(|v| format_model_name(&v))
         })
+        .or_else(|| {
+            session
+                .and_then(|session| session.cwd.as_deref())
+                .and_then(read_recent_project_model)
+        })
+}
+
+// Last-resort guess for a brand-new session with no assistant reply yet:
+// the model that did the most work in this project's previous session,
+// recorded in ~/.claude.json under projects.<cwd>.lastModelUsage.
+fn read_recent_project_model(cwd: &str) -> Option<String> {
+    let raw = fs::read_to_string(home_dir().join(".claude.json")).ok()?;
+    let value: Value = serde_json::from_str(raw.trim_start_matches('\u{feff}')).ok()?;
+    let projects = value.get("projects")?.as_object()?;
+    let target = cwd.replace('\\', "/");
+    let project = projects
+        .iter()
+        .find(|(key, _)| key.replace('\\', "/").eq_ignore_ascii_case(&target))
+        .map(|(_, value)| value)?;
+    let usage = project.get("lastModelUsage")?.as_object()?;
+    usage
+        .iter()
+        .filter(|(id, _)| !id.to_ascii_lowercase().contains("haiku"))
+        .max_by_key(|(_, value)| {
+            value
+                .get("outputTokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        })
+        .and_then(|(id, _)| format_model_name(id))
 }
 
 fn read_settings_model() -> Option<String> {
@@ -1889,6 +1973,7 @@ fn visible_limit_labels(visibility: LimitVisibility) -> Vec<&'static str> {
 fn current_limits(
     machine: &mut StateMachine,
     detected_limits: &[UsageLimitEntry],
+    verbose: bool,
 ) -> Vec<UsageLimitEntry> {
     let now = now_ms();
     if machine.cached_limits.is_empty() {
@@ -1905,7 +1990,7 @@ fn current_limits(
         return machine.cached_limits.clone();
     }
 
-    if let Some(oauth_limits) = maybe_fetch_oauth_limits(machine, now) {
+    if let Some(oauth_limits) = maybe_fetch_oauth_limits(machine, now, verbose) {
         if !oauth_limits.is_empty() {
             machine.cached_limits = merge_limit_entries(&machine.cached_limits, &oauth_limits);
             machine.cached_limits_at_ms = now;
@@ -1929,7 +2014,11 @@ const OAUTH_USAGE_IDLE_POLL_MS: u64 = 10 * 60 * 1000;
 const OAUTH_USAGE_ACTIVITY_POLL_MS: u64 = 60 * 1000;
 const OAUTH_USAGE_BACKOFF_MS: u64 = 5 * 60 * 1000;
 
-fn maybe_fetch_oauth_limits(machine: &mut StateMachine, now: u64) -> Option<Vec<UsageLimitEntry>> {
+fn maybe_fetch_oauth_limits(
+    machine: &mut StateMachine,
+    now: u64,
+    verbose: bool,
+) -> Option<Vec<UsageLimitEntry>> {
     if now < machine.oauth_backoff_until_ms {
         machine.pending_activity_refresh = false;
         return None;
@@ -1946,7 +2035,7 @@ fn maybe_fetch_oauth_limits(machine: &mut StateMachine, now: u64) -> Option<Vec<
     }
     machine.oauth_last_attempt_ms = now;
     machine.pending_activity_refresh = false;
-    match fetch_oauth_usage() {
+    match fetch_oauth_usage(verbose) {
         Ok(entries) => Some(entries),
         Err(OAuthFetchError::RateLimited) => {
             machine.oauth_backoff_until_ms = now + OAUTH_USAGE_BACKOFF_MS;
@@ -1963,7 +2052,7 @@ enum OAuthFetchError {
     Parse,
 }
 
-fn fetch_oauth_usage() -> Result<Vec<UsageLimitEntry>, OAuthFetchError> {
+fn fetch_oauth_usage(verbose: bool) -> Result<Vec<UsageLimitEntry>, OAuthFetchError> {
     let token = read_oauth_access_token().ok_or(OAuthFetchError::NoToken)?;
     let response = ureq::get(OAUTH_USAGE_URL)
         .timeout(std::time::Duration::from_secs(8))
@@ -1977,7 +2066,9 @@ fn fetch_oauth_usage() -> Result<Vec<UsageLimitEntry>, OAuthFetchError> {
         Err(_) => return Err(OAuthFetchError::Network),
     };
     let value: Value = serde_json::from_str(&body).map_err(|_| OAuthFetchError::Parse)?;
-    write_oauth_debug(&value);
+    if verbose {
+        write_oauth_debug(&value);
+    }
     Ok(parse_oauth_usage_response(&value))
 }
 
@@ -2034,13 +2125,11 @@ fn parse_oauth_usage_response(body: &Value) -> Vec<UsageLimitEntry> {
 }
 
 fn extract_oauth_usage_percent(bucket: &Value) -> Option<u8> {
-    for key in [
-        "utilization",
-        "percent_used",
-        "used_percent",
-        "usage",
-        "value",
-    ] {
+    // `utilization` is always a 0..100 percentage in the OAuth usage API.
+    if let Some(raw) = bucket.get("utilization").and_then(Value::as_f64) {
+        return Some(raw.round().clamp(0.0, 100.0) as u8);
+    }
+    for key in ["percent_used", "used_percent", "usage", "value"] {
         let Some(raw) = bucket.get(key).and_then(Value::as_f64) else {
             continue;
         };
@@ -2242,12 +2331,14 @@ fn read_session_info() -> Option<SessionInfo> {
     let project_name = detect_project_name(&file);
     let session_title = read_session_title(&file);
     let model = read_session_tail(&file);
+    let cwd = read_session_cwd(&file);
     Some(SessionInfo {
         file,
         started_at_ms,
         project_name,
         session_title,
         model,
+        cwd,
     })
 }
 
@@ -2635,7 +2726,9 @@ impl DiscordIpc {
     }
 
     fn read_frame(&mut self) -> std::io::Result<Value> {
-        loop {
+        // Bound the loop: a peer that only ever sends PING (opcode 3) must not
+        // be able to keep this thread spinning forever.
+        for _ in 0..16 {
             let mut header = [0u8; 8];
             self.connection.read_exact(&mut header)?;
             let opcode = u32::from_le_bytes(header[0..4].try_into().unwrap());
@@ -2664,6 +2757,10 @@ impl DiscordIpc {
                 _ => {}
             }
         }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "discord ipc: too many control frames",
+        ))
     }
 }
 

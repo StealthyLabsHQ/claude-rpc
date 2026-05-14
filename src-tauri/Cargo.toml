@@ -13,6 +13,7 @@ tauri-build = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-updater = "2"
 ureq = { version = "2.10", default-features = false, features = ["tls", "json"] }
 
 [target.'cfg(windows)'.dependencies]

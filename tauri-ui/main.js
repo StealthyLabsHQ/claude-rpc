@@ -8,10 +8,10 @@ const presets = {
 
 const fields = {
   mode: document.querySelector('#rpc-mode'),
-  logoMode: document.querySelector('#logo-mode'),
   dndToggle: document.querySelector('#dnd-toggle'),
   providerToggle: document.querySelector('#provider-toggle'),
   effortToggle: document.querySelector('#effort-toggle'),
+  sessionTitleToggle: document.querySelector('#session-title-toggle'),
   limitsToggle: document.querySelector('#limits-toggle'),
   limit5hToggle: document.querySelector('#limit-5h-toggle'),
   limitAllToggle: document.querySelector('#limit-all-toggle'),
@@ -23,9 +23,13 @@ const fields = {
   urls: [document.querySelector('#url0'), document.querySelector('#url1')],
   status: document.querySelector('#status'),
   message: document.querySelector('#message'),
+  updateBanner: document.querySelector('#update-banner'),
+  updateText: document.querySelector('#update-text'),
+  updateNow: document.querySelector('#update-now'),
   previewActivity: document.querySelector('#preview-activity'),
-  previewDetails: document.querySelector('#preview-details'),
-  previewState: document.querySelector('#preview-state'),
+  previewPrimary: document.querySelector('#preview-primary'),
+  previewSecondary: document.querySelector('#preview-secondary'),
+  previewTertiary: document.querySelector('#preview-tertiary'),
   previewButtons: document.querySelector('#preview-buttons'),
   themeButtons: [...document.querySelectorAll('[data-theme-option]')],
   sectionToggles: [...document.querySelectorAll('.section-toggle')],
@@ -50,7 +54,6 @@ function readForm() {
   }
   return {
     ...currentConfig,
-    logoMode: fields.logoMode.value,
     dnd: fields.dndToggle.dataset.enabled === 'true',
     showLimits: fields.limitsToggle.dataset.enabled === 'true',
     showLimit5h: fields.limit5hToggle.dataset.enabled === 'true',
@@ -59,6 +62,7 @@ function readForm() {
     showLimitDesign: fields.limitDesignToggle.dataset.enabled === 'true',
     showProvider: fields.providerToggle.dataset.enabled === 'true',
     showEffort: fields.effortToggle.dataset.enabled === 'true',
+    showSessionTitle: fields.sessionTitleToggle.dataset.enabled === 'true',
     verbose: fields.debugToggle.dataset.enabled === 'true',
     rpcMode: fields.mode.value,
     buttons,
@@ -68,10 +72,10 @@ function readForm() {
 function writeForm(config) {
   currentConfig = config || {};
   fields.mode.value = currentConfig.rpcMode || 'playing';
-  fields.logoMode.value = currentConfig.logoMode || 'url';
   syncToggle(fields.dndToggle, !!currentConfig.dnd, 'DND');
   syncToggle(fields.providerToggle, currentConfig.showProvider !== false, 'Provider', '', '');
   syncToggle(fields.effortToggle, currentConfig.showEffort !== false, 'Effort', '', '');
+  syncToggle(fields.sessionTitleToggle, currentConfig.showSessionTitle !== false, 'Session title', '', '');
   syncToggle(fields.limitsToggle, currentConfig.showLimits !== false, '', 'Shown', 'Hidden');
   syncToggle(fields.limit5hToggle, currentConfig.showLimit5h !== false, '5h', '', '');
   syncToggle(fields.limitAllToggle, currentConfig.showLimitAll !== false, 'All', '', '');
@@ -135,7 +139,41 @@ async function load() {
     fields.message.textContent = String(error);
     loading = false;
   }
+  checkForUpdate();
 }
+
+async function checkForUpdate() {
+  let info = null;
+  try {
+    info = await invoke('pending_update');
+  } catch {
+    info = null;
+  }
+  if (!info) {
+    try {
+      info = await invoke('check_update');
+    } catch {
+      info = null;
+    }
+  }
+  if (info && info.version) {
+    fields.updateText.textContent = `Update available — v${info.version}`;
+    fields.updateBanner.hidden = false;
+  } else {
+    fields.updateBanner.hidden = true;
+  }
+}
+
+fields.updateNow.addEventListener('click', async () => {
+  fields.updateText.textContent = 'Downloading update…';
+  fields.updateNow.disabled = true;
+  try {
+    await invoke('install_update');
+  } catch (error) {
+    fields.updateText.textContent = `Update failed: ${error}`;
+    fields.updateNow.disabled = false;
+  }
+});
 
 async function refreshStatus() {
   try {
@@ -170,23 +208,46 @@ function formatStatus(status) {
 function updatePreview() {
   const config = readForm();
   const mode = config.rpcMode || 'playing';
-  fields.previewActivity.textContent =
+  const playing = mode === 'playing';
+  const fallbackHeader =
     {
-      watching: 'Watching Claude',
-      listening: 'Listening Claude',
-      competing: 'Competing Claude',
-      playing: 'Playing Claude',
-    }[mode] || 'Playing Claude';
-  fields.previewDetails.textContent = previewDetails(currentStatus.claudeLine);
-  fields.previewState.textContent = [
-    formatModelForRpc(currentStatus.modelLine, config.showEffort !== false),
-    config.showProvider !== false ? currentStatus.providerLine.replace(/^Provider:\s*/i, '') : '',
-  ]
-    .filter(Boolean)
-    .join(' | ');
-  fields.previewState.title = currentStatus.limitsLine || '';
-  fields.previewState.dataset.limits = currentStatus.limitsLine || '';
+      watching: 'Watching Claude AI',
+      listening: 'Listening to Claude AI',
+      competing: 'Competing in Claude AI',
+      playing: 'Playing',
+    }[mode] || 'Playing';
+  fields.previewActivity.textContent = currentStatus.previewHeader || fallbackHeader;
+  fields.previewPrimary.textContent =
+    currentStatus.previewPrimary || (playing ? 'Claude AI' : 'No Claude activity');
+  fields.previewSecondary.textContent = currentStatus.previewSecondary || '';
+  fields.previewTertiary.textContent = currentStatus.previewTertiary || '';
+  fields.previewTertiary.title = currentStatus.limitsLine || '';
   renderPreviewButtons(mode, config.buttons || []);
+  updateSectionSummaries(config);
+}
+
+function updateSectionSummaries(config) {
+  const modeName =
+    {
+      playing: 'Playing',
+      watching: 'Watching',
+      listening: 'Listening',
+      competing: 'Competing',
+    }[config.rpcMode] || 'Playing';
+  const buttons = config.buttons || [];
+  const summaries = {
+    buttons: buttons.length ? buttons.map((button) => button.label).join(', ') : 'No buttons',
+    mode: [
+      modeName,
+      config.dnd ? 'DND on' : 'DND off',
+      config.showLimits !== false ? 'Limits on' : 'Limits off',
+    ].join(' · '),
+    preview: formatModelForRpc(currentStatus.modelLine, config.showEffort !== false),
+  };
+  document.querySelectorAll('.panel[data-section]').forEach((panel) => {
+    const span = panel.querySelector('.legend-summary');
+    if (span) span.textContent = summaries[panel.dataset.section] || '';
+  });
 }
 
 function formatModelForRpc(model, showEffort) {
@@ -196,12 +257,6 @@ function formatModelForRpc(model, showEffort) {
     return !['low', 'medium', 'high', 'extra high', 'xhigh', 'max'].includes(label);
   });
   return parts.join(' | ') || model;
-}
-
-function previewDetails(line) {
-  if (line.includes('Desktop')) return line.replace(/^Claude:\s*/i, 'Claude ');
-  if (line.includes('CLI') || line.includes('Code')) return 'Claude Code';
-  return 'No Claude activity';
 }
 
 function renderPreviewButtons(mode, buttons) {
@@ -248,12 +303,11 @@ fields.mode.addEventListener('change', () => {
   syncMode();
   scheduleSave();
 });
-fields.logoMode.addEventListener('change', scheduleSave);
 fields.dndToggle.addEventListener('click', () => {
   syncToggle(fields.dndToggle, fields.dndToggle.dataset.enabled !== 'true', 'DND');
   scheduleSave();
 });
-[fields.providerToggle, fields.effortToggle].forEach((button) => {
+[fields.providerToggle, fields.effortToggle, fields.sessionTitleToggle].forEach((button) => {
   button.addEventListener('click', () => {
     syncToggle(button, button.dataset.enabled !== 'true', button.textContent, '', '');
     scheduleSave();
@@ -326,7 +380,9 @@ function initSections() {
       button.setAttribute('aria-expanded', String(expanded));
     };
 
-    sync(localStorage.getItem(key) !== 'collapsed');
+    const stored = localStorage.getItem(key);
+    const expandedByDefault = panel.dataset.section === 'preview';
+    sync(stored ? stored !== 'collapsed' : expandedByDefault);
     button.addEventListener('click', () => {
       const expanded = button.getAttribute('aria-expanded') !== 'true';
       sync(expanded);
