@@ -3,7 +3,7 @@ const invoke = window.__TAURI__.core.invoke;
 const presets = {
   claude: ['Claude', 'https://claude.ai'],
   desktop: ['Claude Desktop', 'https://claude.ai/download'],
-  repo: ['GitHub Repo', 'https://github.com/StealthyLabsHQ/claude-rpc'],
+  repo: ['GitHub Repo', 'https://github.com/stealthsrc/claude-rpc'],
 };
 
 const fields = {

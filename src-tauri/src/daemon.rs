@@ -588,7 +588,7 @@ fn small_image_text(result: &DetectionResult) -> String {
 }
 
 fn logo_image() -> String {
-    "https://raw.githubusercontent.com/StealthyLabsHQ/claude-rpc/main/logo/clawd.png".into()
+    "https://raw.githubusercontent.com/stealthsrc/claude-rpc/main/logo/clawd.png".into()
 }
 
 fn activity_verb(mode: &str) -> &'static str {
@@ -758,7 +758,7 @@ fn default_buttons() -> Vec<RpcButton> {
         },
         RpcButton {
             label: "GitHub Repo".into(),
-            url: "https://github.com/StealthyLabsHQ/claude-rpc".into(),
+            url: "https://github.com/stealthsrc/claude-rpc".into(),
         },
     ]
 }

@@ -100,7 +100,7 @@ Example:
   "rpcMode": "watching",
   "buttons": [
     { "label": "Claude", "url": "https://claude.ai" },
-    { "label": "GitHub Repo", "url": "https://github.com/StealthyLabsHQ/claude-rpc" }
+    { "label": "GitHub Repo", "url": "https://github.com/stealthsrc/claude-rpc" }
   ]
 }
 ```

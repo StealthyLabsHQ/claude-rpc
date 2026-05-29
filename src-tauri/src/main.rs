@@ -158,7 +158,7 @@ fn default_buttons() -> Vec<RpcButton> {
         },
         RpcButton {
             label: "GitHub Repo".into(),
-            url: "https://github.com/StealthyLabsHQ/claude-rpc".into(),
+            url: "https://github.com/stealthsrc/claude-rpc".into(),
         },
     ]
 }
