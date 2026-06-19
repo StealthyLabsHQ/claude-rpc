@@ -1,5 +1,31 @@
 # Changelog
 
+## v3.4.0 (2026-06-19)
+
+### Added
+- **Single instance**: a second launch (autostart + manual, double-click, installer post-run) no longer starts a second tray/daemon — it focuses/opens the existing settings window. Prevents two daemons fighting over the Discord presence. (`tauri-plugin-single-instance`.)
+- **`Ultracode` effort tier**: when `/effort ultracode` is active, the RPC now shows `Ultracode`. The tier leaves `settings.json` `effortLevel` at `xhigh` (it is xhigh + workflow orchestration), so the real signal is the `/effort` "this session only" override recorded in the session log; it is parsed (and cached per session) and takes precedence over `effortLevel`.
+- **Claude Fable 5 model**: `claude-fable-5` (including the Bedrock/Vertex IDs and the `[1m]` variant) now displays as `Claude Fable 5`. Mythos is intentionally not surfaced (invitation-only).
+- **`Refresh limits`** button now forces an immediate OAuth usage re-fetch (it previously only opened the usage page).
+
+### Changed
+- **Usage percentages stay fresh**: any live Claude client now polls the OAuth usage endpoint every 60s instead of the 10-minute idle floor, and `Refresh limits` bypasses the poll interval/backoff.
+- **Per-bucket usage freshness**: each limit bucket now carries its own timestamp and expires individually after 1h (kept below the 5h window) instead of a single 6h global cache — a stale bucket can no longer outlive its own reset, and a partial OAuth response no longer re-marks absent buckets as fresh.
+- **Preview parity**: the Settings preview (header, body lines, buttons, and the limits tooltip) is now driven entirely by the daemon's real layout, removing the transient split-brain when switching RPC mode.
+- **Settings → Limits row** redesigned: the `5h` / `All` / `Sonnet only` filters are now chips (the switch knob no longer overlaps the labels) laid out with flex-wrap.
+- **Settings visual refresh**: premium dark desktop styling across the window (typography, spacing, controls, theme switch).
+
+### Fixed
+- **Idle presence now persists**: `main.rs`'s config struct was missing `show_idle`, so the toggle was silently wiped on every save and never took effect.
+- **Windows Discord IPC hang**: if Discord accepted a presence write but never replied (half-open pipe), the single daemon thread — and app Quit — could block forever. Reads now time out (`PeekNamedPipe` poll on Windows, socket read/write timeouts on Unix) and the loop reconnects.
+- A presence push whose acknowledgement never arrived was treated as successful; it now reconnects instead of caching a possibly-stale presence.
+- Config reload no longer reads the file mtime twice (TOCTOU), so the cached stamp always matches the content actually loaded.
+- UI-scraped usage percentages over 100% are clamped to 100 instead of being dropped (which previously skewed the `Limits (N)` count).
+
+### Removed
+- **`Design` usage-limit category** removed end-to-end — the Settings chip, config flag, OAuth/UI parsing, and display.
+- Dead `webhook_url` config field removed from both config structs (it was never read and had no UI; existing config files still load).
+
 ## v3.3.1 (2026-05-14)
 
 ### Added

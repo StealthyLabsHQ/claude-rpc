@@ -17,7 +17,6 @@ const fields = {
   limit5hToggle: document.querySelector('#limit-5h-toggle'),
   limitAllToggle: document.querySelector('#limit-all-toggle'),
   limitSonnetToggle: document.querySelector('#limit-sonnet-toggle'),
-  limitDesignToggle: document.querySelector('#limit-design-toggle'),
   refreshLimits: document.querySelector('#refresh-limits'),
   debugToggle: document.querySelector('#debug-toggle'),
   labels: [document.querySelector('#label0'), document.querySelector('#label1')],
@@ -61,7 +60,6 @@ function readForm() {
     showLimit5h: fields.limit5hToggle.dataset.enabled === 'true',
     showLimitAll: fields.limitAllToggle.dataset.enabled === 'true',
     showLimitSonnet: fields.limitSonnetToggle.dataset.enabled === 'true',
-    showLimitDesign: fields.limitDesignToggle.dataset.enabled === 'true',
     showProvider: fields.providerToggle.dataset.enabled === 'true',
     showEffort: fields.effortToggle.dataset.enabled === 'true',
     showSessionTitle: fields.sessionTitleToggle.dataset.enabled === 'true',
@@ -83,7 +81,6 @@ function writeForm(config) {
   syncToggle(fields.limit5hToggle, currentConfig.showLimit5h !== false, '5h', '', '');
   syncToggle(fields.limitAllToggle, currentConfig.showLimitAll !== false, 'All', '', '');
   syncToggle(fields.limitSonnetToggle, currentConfig.showLimitSonnet !== false, 'Sonnet only', '', '');
-  syncToggle(fields.limitDesignToggle, currentConfig.showLimitDesign !== false, 'Design', '', '');
   syncToggle(fields.debugToggle, !!currentConfig.verbose, 'Debug');
   syncLimitControls();
   for (let i = 0; i < 2; i += 1) {
@@ -111,7 +108,7 @@ function syncMode() {
 
 function syncLimitControls() {
   const enabled = fields.limitsToggle.dataset.enabled === 'true';
-  [fields.limit5hToggle, fields.limitAllToggle, fields.limitSonnetToggle, fields.limitDesignToggle].forEach(
+  [fields.limit5hToggle, fields.limitAllToggle, fields.limitSonnetToggle].forEach(
     (button) => {
       button.disabled = !enabled;
     },
@@ -211,7 +208,6 @@ function formatStatus(status) {
 function updatePreview() {
   const config = readForm();
   const mode = config.rpcMode || 'playing';
-  const playing = mode === 'playing';
   const fallbackHeader =
     {
       watching: 'Watching Claude AI',
@@ -219,14 +215,35 @@ function updatePreview() {
       competing: 'Competing in Claude AI',
       playing: 'Playing',
     }[mode] || 'Playing';
+  // Drive the whole card from the daemon's authoritative layout so header, body,
+  // buttons and tooltip never disagree during the save lag. The live form mode is
+  // only a fallback for the first paint, before any daemon status has arrived.
+  const daemonMode = effectivePreviewMode(currentStatus.previewHeader, mode);
+  const playing = daemonMode === 'playing';
   fields.previewActivity.textContent = currentStatus.previewHeader || fallbackHeader;
   fields.previewPrimary.textContent =
     currentStatus.previewPrimary || (playing ? 'Claude AI' : 'No Claude activity');
   fields.previewSecondary.textContent = currentStatus.previewSecondary || '';
   fields.previewTertiary.textContent = currentStatus.previewTertiary || '';
-  fields.previewTertiary.title = currentStatus.limitsLine || '';
-  renderPreviewButtons(mode, config.buttons || []);
+  // The limits tooltip belongs on the line that actually carries the state text:
+  // tertiary in playing mode, secondary otherwise (tertiary is then the static
+  // "Powered by Anthropic" line).
+  const limitsTip = currentStatus.limitsLine || '';
+  fields.previewSecondary.title = playing ? '' : limitsTip;
+  fields.previewTertiary.title = playing ? limitsTip : '';
+  renderPreviewButtons(daemonMode, config.buttons || []);
   updateSectionSummaries(config);
+}
+
+// Mirror the mode the daemon actually rendered (from its preview header) so the
+// preview's button visibility and tooltip placement track the daemon-sourced body
+// instead of the unsaved form. Falls back to the form mode before any status.
+function effectivePreviewMode(previewHeader, fallbackMode) {
+  if (!previewHeader) return fallbackMode;
+  if (previewHeader.startsWith('Watching')) return 'watching';
+  if (previewHeader.startsWith('Listening')) return 'listening';
+  if (previewHeader.startsWith('Competing')) return 'competing';
+  return 'playing';
 }
 
 function updateSectionSummaries(config) {
@@ -257,7 +274,7 @@ function formatModelForRpc(model, showEffort) {
   if (showEffort) return model;
   const parts = model.split(' | ').filter((part) => {
     const label = part.trim().toLowerCase();
-    return !['low', 'medium', 'high', 'extra high', 'xhigh', 'max'].includes(label);
+    return !['low', 'medium', 'high', 'extra high', 'xhigh', 'max', 'ultracode'].includes(label);
   });
   return parts.join(' | ') || model;
 }
@@ -335,7 +352,6 @@ fields.limitsToggle.addEventListener('click', () => {
   [fields.limit5hToggle, '5h'],
   [fields.limitAllToggle, 'All'],
   [fields.limitSonnetToggle, 'Sonnet only'],
-  [fields.limitDesignToggle, 'Design'],
 ].forEach(([button, label]) => {
   button.addEventListener('click', () => {
     syncToggle(button, button.dataset.enabled !== 'true', label, '', '');

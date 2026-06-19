@@ -32,6 +32,7 @@ use windows::{
                 CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
                 TH32CS_SNAPPROCESS,
             },
+            Pipes::PeekNamedPipe,
             Threading::{
                 GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
                 PROCESS_QUERY_LIMITED_INFORMATION,
@@ -51,8 +52,13 @@ use windows::{
 const DEFAULT_DISCORD_CLIENT_ID: &str = "1483898157854363799";
 const SCAN_INTERVAL_MS: u64 = 250;
 const RPC_REFRESH_INTERVAL_MS: u64 = 15_000;
+const IPC_READ_TIMEOUT_MS: u64 = 5_000;
 const IDLE_GRACE_MS: u64 = 10_000;
 const LIMITS_CACHE_MS: u64 = 6 * 60 * 60 * 1_000;
+// A per-bucket percentage is only shown as current if it was refreshed within
+// this window. Kept below the shortest usage window (5h) so a stale value can
+// never outlive its own reset; OAuth re-polls well within it (<=10 min idle).
+const LIMITS_DISPLAY_TTL_MS: u64 = 60 * 60 * 1_000;
 const ACTIVITY_PLAYING: u8 = 0;
 const ACTIVITY_LISTENING: u8 = 2;
 const ACTIVITY_WATCHING: u8 = 3;
@@ -79,8 +85,6 @@ struct ClaudeConfig {
     #[serde(default = "default_show_limits")]
     show_limit_sonnet: bool,
     #[serde(default = "default_show_limits")]
-    show_limit_design: bool,
-    #[serde(default = "default_show_limits")]
     show_provider: bool,
     #[serde(default = "default_show_limits")]
     show_effort: bool,
@@ -90,8 +94,6 @@ struct ClaudeConfig {
     show_idle: bool,
     #[serde(default)]
     verbose: bool,
-    #[serde(default)]
-    webhook_url: Option<String>,
     #[serde(default = "default_rpc_mode")]
     rpc_mode: String,
     #[serde(default = "default_buttons")]
@@ -106,13 +108,11 @@ impl Default for ClaudeConfig {
             show_limit_5h: default_show_limits(),
             show_limit_all: default_show_limits(),
             show_limit_sonnet: default_show_limits(),
-            show_limit_design: default_show_limits(),
             show_provider: default_show_limits(),
             show_effort: default_show_limits(),
             show_session_title: default_show_limits(),
             show_idle: false,
             verbose: false,
-            webhook_url: None,
             rpc_mode: default_rpc_mode(),
             buttons: default_buttons(),
         }
@@ -186,13 +186,14 @@ struct StateMachine {
     last_non_idle: Option<DetectionResult>,
     last_non_idle_at_ms: u64,
     cached_limits: Vec<UsageLimitEntry>,
-    cached_limits_at_ms: u64,
     oauth_last_attempt_ms: u64,
     oauth_backoff_until_ms: u64,
     last_session_mtime: u64,
     pending_activity_refresh: bool,
     cached_code_model: Option<String>,
     cached_code_model_session: Option<PathBuf>,
+    cached_code_effort: Option<String>,
+    cached_code_effort_session: Option<PathBuf>,
 }
 
 #[cfg(windows)]
@@ -230,6 +231,11 @@ struct UsageLimitEntry {
     label: String,
     used_percent: u8,
     reset: Option<String>,
+    // When this bucket's percentage was last observed. Stamped per-entry in
+    // merge_limit_entries so a bucket absent from a later (partial) detection is
+    // not re-marked fresh, and can be expired individually past its window.
+    #[serde(default)]
+    updated_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -244,10 +250,14 @@ struct LimitVisibility {
     show_5h: bool,
     show_all: bool,
     show_sonnet: bool,
-    show_design: bool,
 }
 
-pub fn run(stop: Arc<AtomicBool>, config_path: Option<PathBuf>, status_path: Option<PathBuf>) {
+pub fn run(
+    stop: Arc<AtomicBool>,
+    force_refresh: Arc<AtomicBool>,
+    config_path: Option<PathBuf>,
+    status_path: Option<PathBuf>,
+) {
     let config_path = config_path.unwrap_or_else(|| app_dir().join("config.json"));
     let status_path = status_path.unwrap_or_else(|| app_dir().join("status.txt"));
     let client_id = std::env::var("DISCORD_CLIENT_ID")
@@ -273,8 +283,18 @@ pub fn run(stop: Arc<AtomicBool>, config_path: Option<PathBuf>, status_path: Opt
     let mut last_scan_at = 0;
 
     while !stop.load(Ordering::SeqCst) {
-        if modified_ms(&config_path) != config_modified {
-            config_modified = modified_ms(&config_path);
+        // UI "Refresh limits" button: bypass the OAuth poll interval/backoff and
+        // force an immediate usage re-fetch on this iteration.
+        if force_refresh.swap(false, Ordering::SeqCst) {
+            machine.oauth_last_attempt_ms = 0;
+            machine.oauth_backoff_until_ms = 0;
+            machine.pending_activity_refresh = true;
+            last_scan_at = 0;
+        }
+
+        let current_modified = modified_ms(&config_path);
+        if current_modified != config_modified {
+            config_modified = current_modified;
             config = read_config(&config_path);
             result = detect(
                 &mut machine,
@@ -393,6 +413,13 @@ fn detect(
         ClientType::Idle
     };
 
+    // Any live Claude client (Desktop included, even with no churning CLI session
+    // file) counts as activity, so OAuth usage polls at the 60s cadence instead of
+    // the 10-minute idle floor and the displayed percentages stay fresh.
+    if client != ClientType::Idle {
+        machine.pending_activity_refresh = true;
+    }
+
     let desktop = if client == ClientType::Desktop {
         read_desktop_info(&desktop_process_ids, verbose)
     } else {
@@ -442,7 +469,8 @@ fn detect(
     };
 
     if client == ClientType::Code {
-        result.model = append_code_effort(result.model);
+        let effort = resolve_code_effort(machine, session.as_ref());
+        result.model = append_code_effort(result.model, effort);
     }
 
     let now = now_ms();
@@ -575,7 +603,7 @@ fn format_rpc_model(model: &str, show_effort: bool) -> String {
 fn is_effort_label(value: &str) -> bool {
     matches!(
         normalize_ui_label(value).as_str(),
-        "low" | "medium" | "high" | "extra high" | "xhigh" | "max"
+        "low" | "medium" | "high" | "extra high" | "xhigh" | "max" | "ultracode"
     )
 }
 
@@ -696,7 +724,6 @@ fn presence_key(result: &DetectionResult, config: &ClaudeConfig) -> String {
         "showLimit5h": config.show_limit_5h,
         "showLimitAll": config.show_limit_all,
         "showLimitSonnet": config.show_limit_sonnet,
-        "showLimitDesign": config.show_limit_design,
         "showProvider": config.show_provider,
         "showEffort": config.show_effort,
         "showSessionTitle": config.show_session_title,
@@ -712,7 +739,6 @@ fn limit_visibility(config: &ClaudeConfig) -> LimitVisibility {
         show_5h: config.show_limit_5h,
         show_all: config.show_limit_all,
         show_sonnet: config.show_limit_sonnet,
-        show_design: config.show_limit_design,
     }
 }
 
@@ -1605,9 +1631,9 @@ fn read_settings_model() -> Option<String> {
         .and_then(format_model_name)
 }
 
-fn append_code_effort(model: Option<String>) -> Option<String> {
+fn append_code_effort(model: Option<String>, effort: Option<String>) -> Option<String> {
     let model = model?;
-    let effort = detect_code_effort()?;
+    let effort = effort?;
     if model
         .to_ascii_lowercase()
         .contains(&effort.to_ascii_lowercase())
@@ -1618,21 +1644,87 @@ fn append_code_effort(model: Option<String>) -> Option<String> {
     }
 }
 
-fn detect_code_effort() -> Option<String> {
+// A `/effort` "this session only" override (recorded in the session log) wins over
+// the persisted settings.json effortLevel. It is the ONLY signal for the
+// "ultracode" tier, which leaves effortLevel at "xhigh" (it is xhigh + workflow
+// orchestration) and would otherwise display as "Extra high". Cached per-session
+// so it survives the override scrolling past the tail-read window.
+fn resolve_code_effort(machine: &mut StateMachine, session: Option<&SessionInfo>) -> Option<String> {
+    let session_file = session.map(|session| session.file.clone());
+    if machine.cached_code_effort_session != session_file {
+        machine.cached_code_effort = None;
+        machine.cached_code_effort_session = session_file;
+    }
+    if let Some(effort) = read_session_effort_override(session) {
+        machine.cached_code_effort = Some(effort.clone());
+        return Some(effort);
+    }
+    machine
+        .cached_code_effort
+        .clone()
+        .or_else(read_settings_effort)
+}
+
+fn read_settings_effort() -> Option<String> {
     let raw = fs::read_to_string(claude_dir().join("settings.json")).ok()?;
     let value: Value = serde_json::from_str(&raw).ok()?;
-    let effort = value
-        .get("effortLevel")
-        .and_then(Value::as_str)?
-        .trim()
-        .to_ascii_lowercase();
+    effort_label(value.get("effortLevel").and_then(Value::as_str)?)
+}
+
+fn read_session_effort_override(session: Option<&SessionInfo>) -> Option<String> {
+    let lines = read_tail_lines(&session?.file, 256 * 1024)?;
+    for line in lines.iter().rev() {
+        let Ok(entry) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if is_sidechain_entry(&entry) {
+            continue;
+        }
+        if let Some(effort) = read_command_effort(&entry) {
+            return Some(effort);
+        }
+    }
+    None
+}
+
+fn read_command_effort(entry: &Value) -> Option<String> {
+    let content = entry.get("message")?.get("content")?;
+    if let Some(text) = content.as_str() {
+        return parse_command_effort_text(text);
+    }
+    content.as_array()?.iter().find_map(|item| {
+        item.get("text")
+            .and_then(Value::as_str)
+            .and_then(parse_command_effort_text)
+    })
+}
+
+fn parse_command_effort_text(text: &str) -> Option<String> {
+    // Only trust actual /effort command output, not assistant prose that may
+    // mention the phrase.
+    if !text.contains("command-stdout") {
+        return None;
+    }
+    let cleaned = strip_ansi(text)
+        .replace("<local-command-stdout>", " ")
+        .replace("</local-command-stdout>", " ");
+    let marker = "set effort level to ";
+    let lower = cleaned.to_ascii_lowercase();
+    let start = lower.find(marker)? + marker.len();
+    let rest = cleaned[start..].lines().next().unwrap_or_default();
+    let word = rest.split(['(', ':']).next().unwrap_or(rest).trim();
+    effort_label(word)
+}
+
+fn effort_label(raw: &str) -> Option<String> {
     Some(
-        match effort.as_str() {
+        match raw.trim().to_ascii_lowercase().as_str() {
             "low" => "Low",
             "medium" => "Medium",
             "high" => "High",
             "xhigh" | "extrahigh" | "extra high" => "Extra high",
             "max" => "Max",
+            "ultracode" => "Ultracode",
             _ => return None,
         }
         .into(),
@@ -1754,6 +1846,8 @@ fn parse_desktop_model_name(raw: &str) -> Option<DesktopModelCandidate> {
             "Sonnet"
         } else if lower.contains("haiku") {
             "Haiku"
+        } else if lower.contains("fable") {
+            "Fable"
         } else {
             return None;
         };
@@ -1836,13 +1930,16 @@ fn extract_model_version(value: &str, family: &str) -> Option<String> {
 fn default_model_version(family: &str) -> String {
     match family {
         "Haiku" => "4.5",
+        "Fable" => "5",
         _ => "4.6",
     }
     .into()
 }
 
 fn extract_effort_label(lower: &str) -> Option<String> {
-    if lower.contains("extra high") || lower.contains("xhigh") {
+    if lower.contains("ultracode") {
+        Some("Ultracode".into())
+    } else if lower.contains("extra high") || lower.contains("xhigh") {
         Some("Extra high".into())
     } else if lower.contains("medium") {
         Some("Medium".into())
@@ -1878,6 +1975,7 @@ fn parse_usage_limits(names: &[String]) -> Vec<UsageLimitEntry> {
             label,
             used_percent,
             reset: find_limit_reset(names, label_index, index),
+            updated_at_ms: 0,
         });
     }
 
@@ -1901,7 +1999,10 @@ fn parse_used_percent(value: &str) -> Option<u8> {
         .chars()
         .rev()
         .collect::<String>();
-    digits.parse::<u8>().ok()
+    // Parse wide then clamp to 100: an over-limit/glitched scrape (>100, or >255
+    // which would overflow u8 -> None) must not silently drop the row and skew the
+    // "Limits (N)" count — mirror the OAuth path's clamp(0,100).
+    digits.parse::<u32>().ok().map(|value| value.min(100) as u8)
 }
 
 #[cfg(any(windows, test))]
@@ -1912,7 +2013,6 @@ fn find_limit_label(names: &[String], usage_index: usize) -> Option<(String, usi
             "current session" => "5h",
             "all models" => "All",
             "sonnet only" => "Sonnet only",
-            "claude design" => "Design",
             _ => continue,
         };
         return Some((label.into(), index));
@@ -1968,9 +2068,6 @@ fn visible_limit_labels(visibility: LimitVisibility) -> Vec<&'static str> {
     if visibility.show_sonnet {
         labels.push("Sonnet only");
     }
-    if visibility.show_design {
-        labels.push("Design");
-    }
     labels
 }
 
@@ -1983,33 +2080,35 @@ fn current_limits(
     if machine.cached_limits.is_empty() {
         if let Some(cache) = read_limits_cache(now) {
             machine.cached_limits = cache.limits;
-            machine.cached_limits_at_ms = cache.updated_at;
         }
     }
 
     if !detected_limits.is_empty() {
-        machine.cached_limits = merge_limit_entries(&machine.cached_limits, detected_limits);
-        machine.cached_limits_at_ms = now;
+        machine.cached_limits = merge_limit_entries(&machine.cached_limits, detected_limits, now);
         write_limits_cache(now, &machine.cached_limits);
-        return machine.cached_limits.clone();
+        return fresh_limit_entries(&machine.cached_limits, now);
     }
 
     if let Some(oauth_limits) = maybe_fetch_oauth_limits(machine, now, verbose) {
         if !oauth_limits.is_empty() {
-            machine.cached_limits = merge_limit_entries(&machine.cached_limits, &oauth_limits);
-            machine.cached_limits_at_ms = now;
+            machine.cached_limits = merge_limit_entries(&machine.cached_limits, &oauth_limits, now);
             write_limits_cache(now, &machine.cached_limits);
-            return machine.cached_limits.clone();
+            return fresh_limit_entries(&machine.cached_limits, now);
         }
     }
 
-    if !machine.cached_limits.is_empty()
-        && now.saturating_sub(machine.cached_limits_at_ms) <= LIMITS_CACHE_MS
-    {
-        return machine.cached_limits.clone();
-    }
+    fresh_limit_entries(&machine.cached_limits, now)
+}
 
-    Vec::new()
+// Drop buckets not refreshed within LIMITS_DISPLAY_TTL_MS so an individual stale
+// percentage (e.g. one OAuth omitted, or all sources down) is never shown as
+// current, while still-fresh siblings keep displaying.
+fn fresh_limit_entries(entries: &[UsageLimitEntry], now: u64) -> Vec<UsageLimitEntry> {
+    entries
+        .iter()
+        .filter(|entry| now.saturating_sub(entry.updated_at_ms) <= LIMITS_DISPLAY_TTL_MS)
+        .cloned()
+        .collect()
 }
 
 const OAUTH_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
@@ -2107,7 +2206,6 @@ fn parse_oauth_usage_response(body: &Value) -> Vec<UsageLimitEntry> {
         ("five_hour", "5h"),
         ("seven_day", "All"),
         ("seven_day_sonnet", "Sonnet only"),
-        ("seven_day_omelette", "Design"),
     ];
     for (key, label) in buckets {
         let Some(bucket) = body.get(key) else { continue };
@@ -2123,6 +2221,7 @@ fn parse_oauth_usage_response(body: &Value) -> Vec<UsageLimitEntry> {
             label: label.into(),
             used_percent: percent,
             reset,
+            updated_at_ms: 0,
         });
     }
     entries
@@ -2162,17 +2261,26 @@ fn read_limits_cache(now: u64) -> Option<LimitsCache> {
     if now.saturating_sub(updated_at) > LIMITS_CACHE_MS {
         return None;
     }
-    let limits =
+    let mut limits =
         normalize_limit_entries(serde_json::from_value(value.get("limits")?.clone()).ok()?);
+    // Cache files written before per-entry stamps carry updated_at_ms == 0; treat
+    // them as having the file's age so they expire correctly rather than instantly.
+    for entry in &mut limits {
+        if entry.updated_at_ms == 0 {
+            entry.updated_at_ms = updated_at;
+        }
+    }
     Some(LimitsCache { updated_at, limits })
 }
 
 fn merge_limit_entries(
     cached: &[UsageLimitEntry],
     detected: &[UsageLimitEntry],
+    now: u64,
 ) -> Vec<UsageLimitEntry> {
     let mut merged = normalize_limit_entries(cached.to_vec());
-    for entry in normalize_limit_entries(detected.to_vec()) {
+    for mut entry in normalize_limit_entries(detected.to_vec()) {
+        entry.updated_at_ms = now;
         if let Some(existing) = merged.iter_mut().find(|item| item.label == entry.label) {
             *existing = entry;
         } else {
@@ -2208,7 +2316,6 @@ fn normalize_limit_label(label: &str) -> Option<&'static str> {
         "5h" | "session" | "current session" => Some("5h"),
         "all" | "all models" => Some("All"),
         "sonnet" | "sonnet only" | "max only" => Some("Sonnet only"),
-        "design" | "claude design" => Some("Design"),
         _ => None,
     }
 }
@@ -2218,7 +2325,6 @@ fn sort_limit_entries(entries: &mut Vec<UsageLimitEntry>) {
         "5h" => 0,
         "All" => 1,
         "Sonnet only" => 2,
-        "Design" => 3,
         _ => 9,
     });
 }
@@ -2655,6 +2761,57 @@ impl Write for IpcConnection {
     }
 }
 
+impl IpcConnection {
+    /// Block until at least `needed` bytes can be read without the following
+    /// `read_exact` blocking, or fail after `IPC_READ_TIMEOUT_MS`. This bounds the
+    /// single daemon thread (and Quit's `handle.join`) so a wedged Discord that
+    /// accepts the SET_ACTIVITY write but never answers can no longer hang it
+    /// forever — a timeout/closed-pipe surfaces as `Err`, and the run loop drops
+    /// the connection and reconnects on the next tick. On Unix the stream's own
+    /// read timeout already enforces this, so it is a no-op there.
+    fn await_readable(&self, needed: usize) -> std::io::Result<()> {
+        match self {
+            #[cfg(windows)]
+            Self::File(file) => wait_pipe_readable(file, needed),
+            #[cfg(unix)]
+            Self::Unix(_) => {
+                let _ = needed;
+                Ok(())
+            }
+        }
+    }
+}
+
+// Windows named pipes opened as a plain blocking `File` cannot use
+// `set_read_timeout`. Poll `PeekNamedPipe` (non-destructive) until enough bytes
+// are buffered that the subsequent `read_exact` returns immediately, bailing out
+// on a closed pipe or after the timeout budget.
+#[cfg(windows)]
+fn wait_pipe_readable(file: &File, needed: usize) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    if needed == 0 {
+        return Ok(());
+    }
+    let handle = HANDLE(file.as_raw_handle());
+    let deadline = now_ms().saturating_add(IPC_READ_TIMEOUT_MS);
+    loop {
+        let mut available: u32 = 0;
+        unsafe { PeekNamedPipe(handle, None, 0, None, Some(&mut available), None) }.map_err(
+            |_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "discord ipc pipe closed"),
+        )?;
+        if available as usize >= needed {
+            return Ok(());
+        }
+        if now_ms() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "discord ipc read timed out",
+            ));
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
 impl DiscordIpc {
     fn connect(client_id: &str) -> std::io::Result<Self> {
         let mut client = Self {
@@ -2712,7 +2869,15 @@ impl DiscordIpc {
                 return Ok(());
             }
         }
-        Ok(())
+        // No frame carried our nonce within the budget: treat the push as
+        // unconfirmed rather than silently successful, so the run loop drops the
+        // connection and reconnects instead of caching a presence that may never
+        // have landed. With no event subscriptions the response is normally the
+        // very first frame, so this only fires on a genuinely wedged/desynced peer.
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "discord rpc: no matching response",
+        ))
     }
 
     fn next_nonce(&mut self) -> String {
@@ -2734,6 +2899,7 @@ impl DiscordIpc {
         // be able to keep this thread spinning forever.
         for _ in 0..16 {
             let mut header = [0u8; 8];
+            self.connection.await_readable(header.len())?;
             self.connection.read_exact(&mut header)?;
             let opcode = u32::from_le_bytes(header[0..4].try_into().unwrap());
             let len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
@@ -2744,6 +2910,7 @@ impl DiscordIpc {
                 ));
             }
             let mut payload = vec![0u8; len];
+            self.connection.await_readable(len)?;
             self.connection.read_exact(&mut payload)?;
             let value: Value = serde_json::from_slice(&payload)?;
             match opcode {
@@ -2788,6 +2955,11 @@ fn connect_discord_ipc() -> std::io::Result<IpcConnection> {
         for id in 0..10 {
             let path = base.join(format!("discord-ipc-{id}"));
             if let Ok(stream) = UnixStream::connect(path) {
+                // Bound blocking reads/writes so a wedged Discord can't hang the
+                // single daemon thread (and Quit's handle.join) forever; a timeout
+                // surfaces as Err and the run loop reconnects on the next tick.
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(IPC_READ_TIMEOUT_MS)));
+                let _ = stream.set_write_timeout(Some(Duration::from_millis(IPC_READ_TIMEOUT_MS)));
                 return Ok(IpcConnection::Unix(stream));
             }
         }
@@ -2845,7 +3017,7 @@ fn format_model_name(model_id: &str) -> Option<String> {
     };
     let parts = id.split('-').collect::<Vec<_>>();
     let version = parts.windows(3).find_map(|window| {
-        if ["opus", "sonnet", "haiku"].contains(&window[0])
+        if ["opus", "sonnet", "haiku", "fable"].contains(&window[0])
             && window[1].chars().all(|ch| ch.is_ascii_digit())
             && window[2]
                 .chars()
@@ -2867,6 +3039,22 @@ fn format_model_name(model_id: &str) -> Option<String> {
     });
     if id.contains("opusplan") {
         return Some("Opus Plan / Sonnet 4.6".into());
+    }
+    if id.contains("fable") {
+        return Some(format!(
+            "Claude Fable {}{}",
+            version
+                .or_else(|| {
+                    id.split("fable-").nth(1).map(|rest| {
+                        rest.chars()
+                            .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
+                            .collect::<String>()
+                    })
+                })
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "5".into()),
+            context
+        ));
     }
     if id.contains("opus") {
         return Some(format!(
@@ -3272,11 +3460,9 @@ mod tests {
             "18% used".to_string(),
             "Sonnet only".to_string(),
             "13% used".to_string(),
-            "Claude Design".to_string(),
-            "0% used".to_string(),
         ];
         let limits = parse_usage_limits(&names);
-        assert_eq!(limits.len(), 4);
+        assert_eq!(limits.len(), 3);
         assert_eq!(
             limits_line(
                 &limits,
@@ -3285,11 +3471,10 @@ mod tests {
                     show_5h: true,
                     show_all: true,
                     show_sonnet: true,
-                    show_design: true,
                 }
             )
             .as_deref(),
-            Some("Limits (4): 5h 1% | All 18% | Sonnet only 13% | Design 0%")
+            Some("Limits (3): 5h 1% | All 18% | Sonnet only 13%")
         );
         assert_eq!(
             limits_line(
@@ -3299,11 +3484,10 @@ mod tests {
                     show_5h: false,
                     show_all: true,
                     show_sonnet: false,
-                    show_design: true,
                 }
             )
             .as_deref(),
-            Some("Limits (2): All 18% | Design 0%")
+            Some("Limits (1): All 18%")
         );
         assert_eq!(
             limits_line(
@@ -3313,7 +3497,6 @@ mod tests {
                     show_5h: true,
                     show_all: false,
                     show_sonnet: false,
-                    show_design: false,
                 }
             )
             .as_deref(),
@@ -3329,20 +3512,28 @@ mod tests {
                 label: "session".into(),
                 used_percent: 2,
                 reset: None,
+                updated_at_ms: 1_000,
             },
             UsageLimitEntry {
                 label: "all".into(),
                 used_percent: 18,
                 reset: None,
+                updated_at_ms: 1_000,
             },
         ];
         let detected = vec![UsageLimitEntry {
             label: "5h".into(),
             used_percent: 3,
             reset: None,
+            updated_at_ms: 0,
         }];
 
-        let limits = merge_limit_entries(&cached, &detected);
+        let limits = merge_limit_entries(&cached, &detected, 2_000);
+        assert!(limits.iter().all(|entry| entry.updated_at_ms != 0));
+        assert_eq!(
+            limits.iter().find(|entry| entry.label == "5h").unwrap().updated_at_ms,
+            2_000
+        );
         assert_eq!(
             limits_line(
                 &limits,
@@ -3351,7 +3542,6 @@ mod tests {
                     show_5h: true,
                     show_all: true,
                     show_sonnet: true,
-                    show_design: true,
                 }
             )
             .as_deref(),
@@ -3386,6 +3576,49 @@ mod tests {
             build_state(&result, &config),
             "Claude Opus 4.7 (1M) | Limits (1): 5h 3%"
         );
+    }
+
+    #[test]
+    fn formats_fable_model() {
+        assert_eq!(
+            format_model_name("claude-fable-5").as_deref(),
+            Some("Claude Fable 5")
+        );
+        assert_eq!(
+            format_model_name("anthropic.claude-fable-5").as_deref(),
+            Some("Claude Fable 5")
+        );
+        assert_eq!(
+            format_model_name("claude-fable-5[1m]").as_deref(),
+            Some("Claude Fable 5 (1M)")
+        );
+        // Mythos is intentionally left unformatted (enterprise / invite-only).
+        assert_eq!(
+            format_model_name("claude-mythos-5").as_deref(),
+            Some("claude-mythos-5")
+        );
+    }
+
+    #[test]
+    fn parses_effort_command_output() {
+        assert_eq!(
+            parse_command_effort_text(
+                "<local-command-stdout>Set effort level to ultracode (this session only): xhigh + dynamic workflow orchestration</local-command-stdout>"
+            )
+            .as_deref(),
+            Some("Ultracode")
+        );
+        assert_eq!(
+            parse_command_effort_text(
+                "<local-command-stdout>Set effort level to high</local-command-stdout>"
+            )
+            .as_deref(),
+            Some("High")
+        );
+        // Prose without the command-output tag must not match (e.g. chat text).
+        assert_eq!(parse_command_effort_text("set effort level to max"), None);
+        assert_eq!(effort_label("xhigh").as_deref(), Some("Extra high"));
+        assert_eq!(effort_label("nonsense"), None);
     }
 
     #[test]

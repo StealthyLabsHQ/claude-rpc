@@ -1,6 +1,6 @@
 [package]
 name = "claude_rpc_tray"
-version = "3.3.1"
+version = "3.4.0"
 description = "Claude RPC"
 authors = ["StealthyLabs"]
 license = "ISC"
@@ -13,6 +13,7 @@ tauri-build = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 ureq = { version = "2.10", default-features = false, features = ["tls", "json"] }
 
@@ -21,6 +22,7 @@ windows = { version = "0.61.3", features = [
   "Win32_Foundation",
   "Win32_System_Com",
   "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_Pipes",
   "Win32_System_Threading",
   "Win32_UI_Accessibility",
   "Win32_UI_WindowsAndMessaging",

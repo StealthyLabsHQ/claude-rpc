@@ -24,6 +24,7 @@ struct DaemonState {
     running: Arc<Mutex<bool>>,
     error: Mutex<Option<String>>,
     stop: Arc<AtomicBool>,
+    force_refresh: Arc<AtomicBool>,
     handle: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
@@ -78,17 +79,15 @@ struct ClaudeConfig {
     #[serde(default = "default_show_limits")]
     show_limit_sonnet: bool,
     #[serde(default = "default_show_limits")]
-    show_limit_design: bool,
-    #[serde(default = "default_show_limits")]
     show_provider: bool,
     #[serde(default = "default_show_limits")]
     show_effort: bool,
     #[serde(default = "default_show_limits")]
     show_session_title: bool,
     #[serde(default)]
-    verbose: bool,
+    show_idle: bool,
     #[serde(default)]
-    webhook_url: Option<String>,
+    verbose: bool,
     #[serde(default = "default_rpc_mode")]
     rpc_mode: String,
     #[serde(default = "default_buttons")]
@@ -103,12 +102,11 @@ impl Default for ClaudeConfig {
             show_limit_5h: default_show_limits(),
             show_limit_all: default_show_limits(),
             show_limit_sonnet: default_show_limits(),
-            show_limit_design: default_show_limits(),
             show_provider: default_show_limits(),
             show_effort: default_show_limits(),
             show_session_title: default_show_limits(),
+            show_idle: false,
             verbose: false,
-            webhook_url: None,
             rpc_mode: default_rpc_mode(),
             buttons: default_buttons(),
         }
@@ -263,7 +261,8 @@ fn close_settings(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn refresh_limits() -> Result<(), String> {
+fn refresh_limits(state: tauri::State<'_, DaemonState>) -> Result<(), String> {
+    state.force_refresh.store(true, Ordering::SeqCst);
     open_url("https://claude.ai/settings/usage")
 }
 
@@ -338,6 +337,12 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
 
 fn main() {
     tauri::Builder::default()
+        // Must be the first plugin: a second launch (autostart + manual, double
+        // click, installer post-run) is rejected and instead focuses/opens the
+        // existing instance's settings — so only one daemon ever drives Discord.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_settings(app);
+        }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(DaemonState::default())
         .manage(TrayMenuState::default())
@@ -765,10 +770,12 @@ fn start_daemon_inner(_app: &tauri::AppHandle, state: &DaemonState) {
     }
 
     state.stop.store(false, Ordering::SeqCst);
+    state.force_refresh.store(false, Ordering::SeqCst);
     *state.error.lock().expect("daemon error mutex poisoned") = None;
     *running = true;
 
     let stop = Arc::clone(&state.stop);
+    let force_refresh = Arc::clone(&state.force_refresh);
     let running_flag = Arc::clone(&state.running);
     let config_path = config_path().ok();
     let status_path = status_path().ok();
@@ -782,7 +789,7 @@ fn start_daemon_inner(_app: &tauri::AppHandle, state: &DaemonState) {
     }
 
     let handle = std::thread::spawn(move || {
-        daemon::run(stop, config_path, status_path);
+        daemon::run(stop, force_refresh, config_path, status_path);
         if let Ok(mut running) = running_flag.lock() {
             *running = false;
         }

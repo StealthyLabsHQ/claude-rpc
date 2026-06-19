@@ -4,6 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Claude RPC Settings</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="./styles.css" />
     <script defer src="./main.js"></script>
   </head>
@@ -34,20 +37,24 @@
           <span class="legend-label">Buttons</span>
           <span class="legend-summary"></span>
         </button>
-        <div class="grid head">
-          <span>Slot</span>
-          <span>Label</span>
-          <span>URL</span>
-        </div>
-        <div class="grid">
-          <label>Button 1</label>
-          <input id="label0" maxlength="32" spellcheck="false" />
-          <input id="url0" spellcheck="false" />
-        </div>
-        <div class="grid">
-          <label>Button 2</label>
-          <input id="label1" maxlength="32" spellcheck="false" />
-          <input id="url1" spellcheck="false" />
+        <div class="panel-content">
+          <div class="panel-inner">
+            <div class="grid head">
+              <span>Slot</span>
+              <span>Label</span>
+              <span>URL</span>
+            </div>
+            <div class="grid">
+              <label>Button 1</label>
+              <input id="label0" maxlength="32" spellcheck="false" />
+              <input id="url0" spellcheck="false" />
+            </div>
+            <div class="grid">
+              <label>Button 2</label>
+              <input id="label1" maxlength="32" spellcheck="false" />
+              <input id="url1" spellcheck="false" />
+            </div>
+          </div>
         </div>
       </section>
 
@@ -56,39 +63,42 @@
           <span class="legend-label">Mode</span>
           <span class="legend-summary"></span>
         </button>
-        <label for="rpc-mode">IPC mode</label>
-        <select id="rpc-mode">
-          <option value="playing">Playing</option>
-          <option value="watching">Watching (TV)</option>
-          <option value="listening">Listening</option>
-          <option value="competing">Competing</option>
-        </select>
-        <p>Buttons are sent only in Watching mode.</p>
-        <label>DND</label>
-        <button type="button" id="dnd-toggle" class="toggle" aria-pressed="false">DND off</button>
-        <p>Clears Discord activity while Claude detection keeps running.</p>
-        <label>Idle presence</label>
-        <button type="button" id="idle-toggle" class="toggle" aria-pressed="false">Idle off</button>
-        <p>Shows Claude in Discord RPC even when no client is running. Displays usage limits if enabled.</p>
-        <label>IPC info</label>
-        <div class="rpc-info-controls">
-          <button type="button" id="provider-toggle" class="toggle" aria-pressed="true">Provider</button>
-          <button type="button" id="effort-toggle" class="toggle" aria-pressed="true">Effort</button>
-          <button type="button" id="session-title-toggle" class="toggle" aria-pressed="true">Session title</button>
+        <div class="panel-content">
+          <div class="panel-inner mode-grid">
+            <label for="rpc-mode">IPC mode</label>
+            <select id="rpc-mode">
+              <option value="playing">Playing</option>
+              <option value="watching">Watching (TV)</option>
+              <option value="listening">Listening</option>
+              <option value="competing">Competing</option>
+            </select>
+            <p>Buttons are sent only in Watching mode.</p>
+            <label>DND</label>
+            <button type="button" id="dnd-toggle" class="toggle" aria-pressed="false">DND off</button>
+            <p>Clears Discord activity while Claude detection keeps running.</p>
+            <label>Idle presence</label>
+            <button type="button" id="idle-toggle" class="toggle" aria-pressed="false">Idle off</button>
+            <p>Shows Claude in Discord RPC even when no client is running. Displays usage limits if enabled.</p>
+            <label>IPC info</label>
+            <div class="rpc-info-controls">
+              <button type="button" id="provider-toggle" class="toggle" aria-pressed="true">Provider</button>
+              <button type="button" id="effort-toggle" class="toggle" aria-pressed="true">Effort</button>
+              <button type="button" id="session-title-toggle" class="toggle" aria-pressed="true">Session title</button>
+            </div>
+            <p>Controls provider, effort, and session title labels in Discord RPC.</p>
+            <label>Limits</label>
+            <div class="limit-controls">
+              <button type="button" id="limits-toggle" class="toggle" aria-pressed="true">Shown</button>
+              <button type="button" id="limit-5h-toggle" class="toggle compact" aria-pressed="true">5h</button>
+              <button type="button" id="limit-all-toggle" class="toggle compact" aria-pressed="true">All</button>
+              <button type="button" id="limit-sonnet-toggle" class="toggle compact" aria-pressed="true">Sonnet only</button>
+              <button type="button" id="refresh-limits" class="ghost">Refresh</button>
+            </div>
+            <label>Debug</label>
+            <button type="button" id="debug-toggle" class="toggle" aria-pressed="false">Debug off</button>
+            <p>Writes UIAutomation dump to .claude-rpc/ui-debug.json.</p>
+          </div>
         </div>
-        <p>Controls provider, effort, and session title labels in Discord RPC.</p>
-        <label>Limits</label>
-        <div class="limit-controls">
-          <button type="button" id="limits-toggle" class="toggle" aria-pressed="true">Shown</button>
-          <button type="button" id="limit-5h-toggle" class="toggle compact" aria-pressed="true">5h</button>
-          <button type="button" id="limit-all-toggle" class="toggle compact" aria-pressed="true">All</button>
-          <button type="button" id="limit-sonnet-toggle" class="toggle compact" aria-pressed="true">Sonnet only</button>
-          <button type="button" id="limit-design-toggle" class="toggle compact" aria-pressed="true">Design</button>
-          <button type="button" id="refresh-limits" class="ghost">Refresh</button>
-        </div>
-        <label>Debug</label>
-        <button type="button" id="debug-toggle" class="toggle" aria-pressed="false">Debug off</button>
-        <p>Writes UIAutomation dump to .claude-rpc/ui-debug.json.</p>
       </section>
 
       <section class="panel preview-panel" data-section="preview">
@@ -96,15 +106,19 @@
           <span class="legend-label">Preview</span>
           <span class="legend-summary"></span>
         </button>
-        <div class="rpc-preview">
-          <span id="preview-activity" class="preview-activity">Playing</span>
-          <div class="rpc-card">
-            <img class="preview-icon" src="./clawd.webp" alt="" />
-            <div class="preview-copy">
-              <strong id="preview-primary">Claude AI</strong>
-              <span id="preview-secondary">Claude Code</span>
-              <span id="preview-tertiary">Auto-detect</span>
-              <div id="preview-buttons" class="preview-buttons"></div>
+        <div class="panel-content">
+          <div class="panel-inner">
+            <div class="rpc-preview">
+              <span id="preview-activity" class="preview-activity">Playing</span>
+              <div class="rpc-card">
+                <img class="preview-icon" src="./clawd.webp" alt="" />
+                <div class="preview-copy">
+                  <strong id="preview-primary">Claude AI</strong>
+                  <span id="preview-secondary"></span>
+                  <span id="preview-tertiary"></span>
+                  <div id="preview-buttons" class="preview-buttons"></div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -112,9 +126,13 @@
 
       <section class="panel presets" data-section="presets">
         <button type="button" class="legend section-toggle" aria-expanded="true">Presets</button>
-        <button type="button" data-preset="claude">Claude</button>
-        <button type="button" data-preset="desktop">Desktop</button>
-        <button type="button" data-preset="repo">GitHub repo</button>
+        <div class="panel-content">
+          <div class="panel-inner presets-grid">
+            <button type="button" data-preset="claude">Claude</button>
+            <button type="button" data-preset="desktop">Desktop</button>
+            <button type="button" data-preset="repo">GitHub repo</button>
+          </div>
+        </div>
       </section>
 
       <footer>
