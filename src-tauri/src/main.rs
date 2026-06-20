@@ -85,6 +85,14 @@ struct ClaudeConfig {
     #[serde(default = "default_show_limits")]
     show_session_title: bool,
     #[serde(default)]
+    show_cost: bool,
+    #[serde(default)]
+    show_cost_total: bool,
+    #[serde(default)]
+    show_project_tokens: bool,
+    #[serde(default)]
+    show_all_tokens: bool,
+    #[serde(default)]
     show_idle: bool,
     #[serde(default)]
     verbose: bool,
@@ -105,6 +113,10 @@ impl Default for ClaudeConfig {
             show_provider: default_show_limits(),
             show_effort: default_show_limits(),
             show_session_title: default_show_limits(),
+            show_cost: false,
+            show_cost_total: false,
+            show_project_tokens: false,
+            show_all_tokens: false,
             show_idle: false,
             verbose: false,
             rpc_mode: default_rpc_mode(),
@@ -127,6 +139,16 @@ struct ClaudeStatus {
     preview_primary: Option<String>,
     preview_secondary: Option<String>,
     preview_tertiary: Option<String>,
+    cost_shown: bool,
+    cost_line: Option<String>,
+    cost_total_shown: bool,
+    cost_total_line: Option<String>,
+    project_tokens_shown: bool,
+    project_tokens_line: Option<String>,
+    all_tokens_shown: bool,
+    all_tokens_line: Option<String>,
+    model_costs_all: Value,
+    model_costs_current: Value,
     daemon_running: bool,
     daemon_pid: Option<u32>,
     daemon_error: Option<String>,
@@ -232,6 +254,46 @@ fn load_status(state: tauri::State<'_, DaemonState>) -> Result<ClaudeStatus, Str
             .get("previewTertiary")
             .and_then(Value::as_str)
             .map(str::to_string),
+        cost_shown: value
+            .get("costShown")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        cost_line: value
+            .get("costLine")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        cost_total_shown: value
+            .get("costTotalShown")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        cost_total_line: value
+            .get("costTotalLine")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        project_tokens_shown: value
+            .get("projectTokensShown")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        project_tokens_line: value
+            .get("projectTokensLine")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        all_tokens_shown: value
+            .get("allTokensShown")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        all_tokens_line: value
+            .get("allTokensLine")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        model_costs_all: value
+            .get("modelCostsAll")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new())),
+        model_costs_current: value
+            .get("modelCostsCurrent")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new())),
         daemon_running: daemon.running,
         daemon_pid: daemon.pid,
         daemon_error: daemon.error,
@@ -561,6 +623,7 @@ fn show_settings(app: &tauri::AppHandle) {
     .inner_size(790.0, 640.0)
     .min_inner_size(680.0, 480.0)
     .resizable(true)
+    .decorations(false)
     .build()
     {
         let window_to_hide = window.clone();

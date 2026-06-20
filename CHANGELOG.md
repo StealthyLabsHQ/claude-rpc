@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.5.0 (2026-06-20)
+
+### Added
+- **Usage cost panel**: a new Settings → Usage cost section breaks spend down per model family (Opus / Sonnet / Haiku / Fable) for the current session and across all projects, with token counts and the input/output split. The current session is computed live from the session log (cache-aware); the all-projects figures use Claude's own per-model accounting, with the active project's live session counted once (it replaces, not adds to, that project's stored last session). Optional Discord RPC labels expose per-model cost, the all-projects `$` total, current-project tokens, and the all-projects token total (the `Cost` / `Total` / `Proj tokens` / `All tokens` toggles in Settings → Mode, mutually exclusive per scope).
+- **Custom window title bar**: the native Windows title bar is replaced by a minimal frameless bar — app logo on the left, window controls (minimize / maximize / close) on the right. The whole bar drags the window, double-click toggles maximize, and Close hides to the tray (same as the footer Close and the old window `X` — it never kills the daemon).
+
 ## v3.4.0 (2026-06-19)
 
 ### Added

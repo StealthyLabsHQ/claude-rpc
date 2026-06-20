@@ -91,6 +91,14 @@ struct ClaudeConfig {
     #[serde(default = "default_show_limits")]
     show_session_title: bool,
     #[serde(default)]
+    show_cost: bool,
+    #[serde(default)]
+    show_cost_total: bool,
+    #[serde(default)]
+    show_project_tokens: bool,
+    #[serde(default)]
+    show_all_tokens: bool,
+    #[serde(default)]
     show_idle: bool,
     #[serde(default)]
     verbose: bool,
@@ -111,6 +119,10 @@ impl Default for ClaudeConfig {
             show_provider: default_show_limits(),
             show_effort: default_show_limits(),
             show_session_title: default_show_limits(),
+            show_cost: false,
+            show_cost_total: false,
+            show_project_tokens: false,
+            show_all_tokens: false,
             show_idle: false,
             verbose: false,
             rpc_mode: default_rpc_mode(),
@@ -139,6 +151,9 @@ struct DetectionResult {
     session_title: Option<String>,
     code_instances: usize,
     started_at_ms: Option<u64>,
+    cost_line: Option<String>,
+    model_costs_all: Vec<ModelCost>,
+    model_costs_current: Vec<ModelCost>,
 }
 
 impl Default for DetectionResult {
@@ -155,6 +170,9 @@ impl Default for DetectionResult {
             session_title: None,
             code_instances: 0,
             started_at_ms: None,
+            cost_line: None,
+            model_costs_all: Vec::new(),
+            model_costs_current: Vec::new(),
         }
     }
 }
@@ -194,6 +212,11 @@ struct StateMachine {
     cached_code_model_session: Option<PathBuf>,
     cached_code_effort: Option<String>,
     cached_code_effort_session: Option<PathBuf>,
+    cached_project_usages: Option<Vec<ProjectUsage>>,
+    cached_project_usages_mtime: u64,
+    cached_session_costs: Option<Vec<ModelCost>>,
+    cached_session_costs_file: Option<PathBuf>,
+    cached_session_costs_mtime: u64,
 }
 
 #[cfg(windows)]
@@ -252,6 +275,29 @@ struct LimitVisibility {
     show_sonnet: bool,
 }
 
+// Per-model usage rolled up by model family (Opus/Sonnet/Haiku/Fable). `cost_usd`
+// is Claude Code's own figure (cache-aware) summed across the family's snapshots;
+// `input_cost`/`output_cost` are the table-rate breakdown of the input/output
+// tokens (no cache), so the UI can show both the real spend and the in/out split.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelCost {
+    label: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+    input_cost: f64,
+    output_cost: f64,
+    cost_usd: f64,
+}
+
+#[derive(Debug, Clone)]
+struct ProjectUsage {
+    path_norm: String,
+    models: Vec<ModelCost>,
+}
+
 pub fn run(
     stop: Arc<AtomicBool>,
     force_refresh: Arc<AtomicBool>,
@@ -279,6 +325,7 @@ pub fn run(
         idle_grace_ms,
         config.verbose,
         limit_visibility(&config),
+        cost_enabled(&config),
     );
     let mut last_scan_at = 0;
 
@@ -301,6 +348,7 @@ pub fn run(
                 idle_grace_ms,
                 config.verbose,
                 limit_visibility(&config),
+                cost_enabled(&config),
             );
             last_scan_at = now_ms();
             last_key.clear();
@@ -320,6 +368,7 @@ pub fn run(
                 idle_grace_ms,
                 config.verbose,
                 limit_visibility(&config),
+                cost_enabled(&config),
             );
             last_scan_at = now;
         }
@@ -375,6 +424,7 @@ fn detect(
     idle_grace_ms: u64,
     verbose: bool,
     limit_visibility: LimitVisibility,
+    cost_enabled: bool,
 ) -> DetectionResult {
     let mut desktop_found = false;
     let mut desktop_process_ids = Vec::new();
@@ -466,11 +516,34 @@ fn detect(
         code_instances: code_count,
         started_at_ms: oldest
             .or_else(|| session.as_ref().and_then(|session| session.started_at_ms)),
+        cost_line: None,
+        model_costs_all: Vec::new(),
+        model_costs_current: Vec::new(),
     };
 
     if client == ClientType::Code {
         let effort = resolve_code_effort(machine, session.as_ref());
         result.model = append_code_effort(result.model, effort);
+    }
+
+    if cost_enabled && result.client != ClientType::Idle {
+        // All-projects cumulative from each project's last completed session,
+        // plus the current project's own stored last session (`current_stored`),
+        // which fold_live_session drops once the live session supersedes it.
+        let (all, current_stored) = {
+            let cwd = session.as_ref().and_then(|session| session.cwd.as_deref());
+            let usages = project_usages(machine);
+            aggregate_costs(usages, cwd)
+        };
+        // Current = the live, in-progress session straight from its .jsonl, since
+        // ~/.claude.json holds no usage for a running session.
+        let current = session
+            .as_ref()
+            .map(|session| session_costs(machine, &session.file))
+            .unwrap_or_default();
+        result.cost_line = build_cost_line(&current);
+        result.model_costs_all = fold_live_session(all, &current_stored, &current);
+        result.model_costs_current = current;
     }
 
     let now = now_ms();
@@ -577,6 +650,26 @@ fn build_state(result: &DetectionResult, config: &ClaudeConfig) -> String {
     let mut parts = vec![model];
     if config.show_provider {
         parts.push(result.provider.clone());
+    }
+    if config.show_cost {
+        if let Some(cost) = result.cost_line.as_deref() {
+            parts.push(cost.to_string());
+        }
+    }
+    if config.show_project_tokens {
+        if let Some(tokens) = build_project_tokens_line(&result.model_costs_current) {
+            parts.push(tokens);
+        }
+    }
+    if config.show_cost_total {
+        if let Some(total) = build_total_line(&result.model_costs_all) {
+            parts.push(total);
+        }
+    }
+    if config.show_all_tokens {
+        if let Some(tokens) = build_all_tokens_line(&result.model_costs_all) {
+            parts.push(tokens);
+        }
     }
     if let Some(limits) = result.limits_line.as_deref() {
         parts.push(limits.to_string());
@@ -694,6 +787,16 @@ fn build_status(
         "previewPrimary": preview_primary,
         "previewSecondary": preview_secondary,
         "previewTertiary": preview_tertiary,
+        "costShown": config.show_cost,
+        "costLine": result.cost_line.clone(),
+        "costTotalShown": config.show_cost_total,
+        "costTotalLine": build_total_line(&result.model_costs_all),
+        "projectTokensShown": config.show_project_tokens,
+        "projectTokensLine": build_project_tokens_line(&result.model_costs_current),
+        "allTokensShown": config.show_all_tokens,
+        "allTokensLine": build_all_tokens_line(&result.model_costs_all),
+        "modelCostsAll": result.model_costs_all,
+        "modelCostsCurrent": result.model_costs_current,
     })
 }
 
@@ -727,6 +830,14 @@ fn presence_key(result: &DetectionResult, config: &ClaudeConfig) -> String {
         "showProvider": config.show_provider,
         "showEffort": config.show_effort,
         "showSessionTitle": config.show_session_title,
+        "showCost": config.show_cost,
+        "cost": result.cost_line,
+        "showCostTotal": config.show_cost_total,
+        "costTotal": build_total_line(&result.model_costs_all),
+        "showProjectTokens": config.show_project_tokens,
+        "projectTokens": build_project_tokens_line(&result.model_costs_current),
+        "showAllTokens": config.show_all_tokens,
+        "allTokens": build_all_tokens_line(&result.model_costs_all),
         "showIdle": config.show_idle,
         "buttons": config.buttons,
     }))
@@ -740,6 +851,388 @@ fn limit_visibility(config: &ClaudeConfig) -> LimitVisibility {
         show_all: config.show_limit_all,
         show_sonnet: config.show_limit_sonnet,
     }
+}
+
+// Cost/token data must be gathered whenever any cost- or token-related Discord
+// label (or the Settings panel) is on.
+fn cost_enabled(config: &ClaudeConfig) -> bool {
+    config.show_cost
+        || config.show_cost_total
+        || config.show_project_tokens
+        || config.show_all_tokens
+}
+
+// Per-million input/output rates from the published model pricing
+// (platform.claude.com/docs/.../models/overview). Returns the family label used
+// to roll up snapshots and to match the active model for the Discord summary.
+fn model_pricing(model_id: &str) -> Option<(&'static str, f64, f64)> {
+    let id = model_id.to_ascii_lowercase();
+    // Snapshot ids carry suffixes like "[1m]"; classify on the bare id.
+    let base = id.split('[').next().unwrap_or(id.as_str());
+    if base.contains("fable") || base.contains("mythos") {
+        Some(("Fable", 10.0, 50.0))
+    } else if base.contains("haiku") {
+        Some(("Haiku", 1.0, 5.0))
+    } else if base.contains("sonnet") {
+        Some(("Sonnet", 3.0, 15.0))
+    } else if base.contains("opus") {
+        // Opus 4.1 is the lone $15/$75 tier; 4.5/4.6/4.7/4.8 are all $5/$25.
+        if base.contains("opus-4-1-") || base.ends_with("opus-4-1") {
+            Some(("Opus", 15.0, 75.0))
+        } else {
+            Some(("Opus", 5.0, 25.0))
+        }
+    } else {
+        None
+    }
+}
+
+fn normalize_project_path(path: &str) -> String {
+    path.replace('\\', "/").to_ascii_lowercase()
+}
+
+fn format_cost(value: f64) -> String {
+    format!("${value:.2}")
+}
+
+fn format_tokens(count: u64) -> String {
+    if count >= 1_000_000 {
+        format!("{:.1}M", count as f64 / 1_000_000.0)
+    } else if count >= 1_000 {
+        format!("{:.0}K", count as f64 / 1_000.0)
+    } else {
+        count.to_string()
+    }
+}
+
+fn sort_costs(models: &mut [ModelCost]) {
+    models.sort_by(|a, b| {
+        b.cost_usd
+            .partial_cmp(&a.cost_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
+fn add_cost(bucket: &mut ModelCost, model: &ModelCost) {
+    bucket.input_tokens += model.input_tokens;
+    bucket.output_tokens += model.output_tokens;
+    bucket.cache_read_tokens += model.cache_read_tokens;
+    bucket.cache_creation_tokens += model.cache_creation_tokens;
+    bucket.input_cost += model.input_cost;
+    bucket.output_cost += model.output_cost;
+    bucket.cost_usd += model.cost_usd;
+}
+
+// Inverse of add_cost: remove a snapshot already folded into the bucket. Tokens
+// use saturating_sub and costs are floored at 0 since the subtrahend is always a
+// subset of the bucket, so the result can't legitimately go negative.
+fn sub_cost(bucket: &mut ModelCost, model: &ModelCost) {
+    bucket.input_tokens = bucket.input_tokens.saturating_sub(model.input_tokens);
+    bucket.output_tokens = bucket.output_tokens.saturating_sub(model.output_tokens);
+    bucket.cache_read_tokens = bucket.cache_read_tokens.saturating_sub(model.cache_read_tokens);
+    bucket.cache_creation_tokens = bucket
+        .cache_creation_tokens
+        .saturating_sub(model.cache_creation_tokens);
+    bucket.input_cost = (bucket.input_cost - model.input_cost).max(0.0);
+    bucket.output_cost = (bucket.output_cost - model.output_cost).max(0.0);
+    bucket.cost_usd = (bucket.cost_usd - model.cost_usd).max(0.0);
+}
+
+// Merge the live in-progress session into the all-projects rollup. The active
+// project's stored lastModelUsage (`current_stored`, already inside `all`) is
+// subtracted before the live session is added, so a running project that also
+// had a prior completed session isn't counted twice (prior + live). With no live
+// session the rollup is returned unchanged, so a just-opened session keeps
+// showing its prior spend until the first turn lands.
+fn fold_live_session(
+    all: Vec<ModelCost>,
+    current_stored: &[ModelCost],
+    current: &[ModelCost],
+) -> Vec<ModelCost> {
+    if current.is_empty() {
+        return all;
+    }
+    let mut merged: HashMap<String, ModelCost> = HashMap::new();
+    for model in &all {
+        let bucket = merged.entry(model.label.clone()).or_insert_with(|| ModelCost {
+            label: model.label.clone(),
+            ..ModelCost::default()
+        });
+        add_cost(bucket, model);
+    }
+    for model in current_stored {
+        if let Some(bucket) = merged.get_mut(&model.label) {
+            sub_cost(bucket, model);
+        }
+    }
+    for model in current {
+        let bucket = merged.entry(model.label.clone()).or_insert_with(|| ModelCost {
+            label: model.label.clone(),
+            ..ModelCost::default()
+        });
+        add_cost(bucket, model);
+    }
+    // Drop families that netted to exactly zero: a prior-session family of the
+    // current project that the live session no longer uses.
+    let mut all: Vec<ModelCost> = merged
+        .into_values()
+        .filter(|model| {
+            model.input_tokens > 0
+                || model.output_tokens > 0
+                || model.cache_read_tokens > 0
+                || model.cache_creation_tokens > 0
+        })
+        .collect();
+    sort_costs(&mut all);
+    all
+}
+
+// Parse ~/.claude.json once into per-project, per-family rollups. Cheap to
+// aggregate afterwards; the parse itself is gated behind an mtime cache.
+fn read_project_usages() -> Vec<ProjectUsage> {
+    let raw = match fs::read_to_string(home_dir().join(".claude.json")) {
+        Ok(raw) => raw,
+        Err(_) => return Vec::new(),
+    };
+    let value: Value = match serde_json::from_str(raw.trim_start_matches('\u{feff}')) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    let Some(projects) = value.get("projects").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (path, project) in projects {
+        let Some(usage) = project.get("lastModelUsage").and_then(Value::as_object) else {
+            continue;
+        };
+        let mut by_family: HashMap<&'static str, ModelCost> = HashMap::new();
+        for (model_id, entry) in usage {
+            let Some((label, input_rate, output_rate)) = model_pricing(model_id) else {
+                continue;
+            };
+            let input = entry.get("inputTokens").and_then(Value::as_u64).unwrap_or(0);
+            let output = entry
+                .get("outputTokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let cache_read = entry
+                .get("cacheReadInputTokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let cache_creation = entry
+                .get("cacheCreationInputTokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let cost = entry.get("costUSD").and_then(Value::as_f64).unwrap_or(0.0);
+            let bucket = by_family.entry(label).or_insert_with(|| ModelCost {
+                label: label.to_string(),
+                ..ModelCost::default()
+            });
+            bucket.input_tokens += input;
+            bucket.output_tokens += output;
+            bucket.cache_read_tokens += cache_read;
+            bucket.cache_creation_tokens += cache_creation;
+            bucket.input_cost += input as f64 / 1_000_000.0 * input_rate;
+            bucket.output_cost += output as f64 / 1_000_000.0 * output_rate;
+            bucket.cost_usd += cost;
+        }
+        if by_family.is_empty() {
+            continue;
+        }
+        let mut models: Vec<ModelCost> = by_family.into_values().collect();
+        sort_costs(&mut models);
+        out.push(ProjectUsage {
+            path_norm: normalize_project_path(path),
+            models,
+        });
+    }
+    out
+}
+
+fn project_usages(machine: &mut StateMachine) -> &[ProjectUsage] {
+    let path = home_dir().join(".claude.json");
+    let mtime = modified_ms(&path).unwrap_or(0);
+    if machine.cached_project_usages.is_none() || machine.cached_project_usages_mtime != mtime {
+        machine.cached_project_usages = Some(read_project_usages());
+        machine.cached_project_usages_mtime = mtime;
+    }
+    machine.cached_project_usages.as_deref().unwrap_or(&[])
+}
+
+// Returns (all projects combined, current project) rolled up per model family.
+fn aggregate_costs(usages: &[ProjectUsage], cwd: Option<&str>) -> (Vec<ModelCost>, Vec<ModelCost>) {
+    let mut all: HashMap<String, ModelCost> = HashMap::new();
+    for usage in usages {
+        for model in &usage.models {
+            let bucket = all.entry(model.label.clone()).or_insert_with(|| ModelCost {
+                label: model.label.clone(),
+                ..ModelCost::default()
+            });
+            add_cost(bucket, model);
+        }
+    }
+    let mut all: Vec<ModelCost> = all.into_values().collect();
+    sort_costs(&mut all);
+
+    let current = cwd
+        .map(normalize_project_path)
+        .and_then(|target| usages.iter().find(|usage| usage.path_norm == target))
+        .map(|usage| usage.models.clone())
+        .unwrap_or_default();
+
+    (all, current)
+}
+
+// Standard prompt-caching multipliers over the model's base input rate:
+// reads are 0.1x, 5-minute cache writes 1.25x, 1-hour cache writes 2x.
+const CACHE_READ_MULT: f64 = 0.1;
+const CACHE_WRITE_5M_MULT: f64 = 1.25;
+const CACHE_WRITE_1H_MULT: f64 = 2.0;
+
+// Live per-model cost for the in-progress session, summed straight from the
+// session .jsonl. Needed because ~/.claude.json only records per-project usage
+// (lastModelUsage / lastCost) at session end, so a running session shows nothing
+// there. Each assistant turn carries message.usage; cost_usd is computed locally
+// (input/output at table rate plus cache reads/writes at the standard multipliers)
+// since Claude's own costUSD isn't written until the session closes.
+fn session_model_costs(path: &Path) -> Vec<ModelCost> {
+    match fs::read_to_string(path) {
+        Ok(raw) => session_model_costs_from_str(&raw),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn session_model_costs_from_str(raw: &str) -> Vec<ModelCost> {
+    let mut by_family: HashMap<&'static str, ModelCost> = HashMap::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let entry: Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if entry.get("type").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(message) = entry.get("message") else {
+            continue;
+        };
+        let Some(usage) = message.get("usage") else {
+            continue;
+        };
+        let model_id = message.get("model").and_then(Value::as_str).unwrap_or("");
+        let Some((label, input_rate, output_rate)) = model_pricing(model_id) else {
+            continue;
+        };
+        let tok = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+        let input = tok("input_tokens");
+        let output = tok("output_tokens");
+        let cache_read = tok("cache_read_input_tokens");
+        let cache_creation = tok("cache_creation_input_tokens");
+        // Split cache writes into 5m vs 1h when the breakdown is present; otherwise
+        // treat the whole creation bucket as 5m.
+        let (write_5m, write_1h) = match usage.get("cache_creation") {
+            Some(detail) => {
+                let f = |key: &str| detail.get(key).and_then(Value::as_u64).unwrap_or(0);
+                let (w5, w1) = (f("ephemeral_5m_input_tokens"), f("ephemeral_1h_input_tokens"));
+                if w5 + w1 == 0 {
+                    (cache_creation, 0)
+                } else {
+                    (w5, w1)
+                }
+            }
+            None => (cache_creation, 0),
+        };
+
+        let input_cost = input as f64 / 1_000_000.0 * input_rate;
+        let output_cost = output as f64 / 1_000_000.0 * output_rate;
+        let cache_cost = (cache_read as f64 * CACHE_READ_MULT
+            + write_5m as f64 * CACHE_WRITE_5M_MULT
+            + write_1h as f64 * CACHE_WRITE_1H_MULT)
+            / 1_000_000.0
+            * input_rate;
+
+        let bucket = by_family.entry(label).or_insert_with(|| ModelCost {
+            label: label.to_string(),
+            ..ModelCost::default()
+        });
+        bucket.input_tokens += input;
+        bucket.output_tokens += output;
+        bucket.cache_read_tokens += cache_read;
+        bucket.cache_creation_tokens += cache_creation;
+        bucket.input_cost += input_cost;
+        bucket.output_cost += output_cost;
+        bucket.cost_usd += input_cost + output_cost + cache_cost;
+    }
+    let mut models: Vec<ModelCost> = by_family.into_values().collect();
+    sort_costs(&mut models);
+    models
+}
+
+fn session_costs(machine: &mut StateMachine, path: &Path) -> Vec<ModelCost> {
+    let mtime = modified_ms(path).unwrap_or(0);
+    if machine.cached_session_costs.is_none()
+        || machine.cached_session_costs_file.as_deref() != Some(path)
+        || machine.cached_session_costs_mtime != mtime
+    {
+        machine.cached_session_costs = Some(session_model_costs(path));
+        machine.cached_session_costs_file = Some(path.to_path_buf());
+        machine.cached_session_costs_mtime = mtime;
+    }
+    machine.cached_session_costs.clone().unwrap_or_default()
+}
+
+// Compact per-model price summary for the current project/session only, e.g.
+// "Opus $81.57 · Sonnet $0.55 · +1". Price only — token counts come from the
+// separate Proj/All tokens toggles, so Cost never duplicates the token labels.
+fn build_cost_line(current: &[ModelCost]) -> Option<String> {
+    let positives: Vec<&ModelCost> = current.iter().filter(|model| model.cost_usd > 0.0).collect();
+    if positives.is_empty() {
+        return None;
+    }
+    const TOP: usize = 3;
+    let mut parts: Vec<String> = positives
+        .iter()
+        .take(TOP)
+        .map(|model| format!("{} {}", model.label, format_cost(model.cost_usd)))
+        .collect();
+    if positives.len() > TOP {
+        parts.push(format!("+{}", positives.len() - TOP));
+    }
+    Some(parts.join(" · "))
+}
+
+// All-projects grand total in parentheses for the Discord line, e.g. "($321.99)".
+// Gated by its own toggle so it can be shown independently of the per-model line.
+fn build_total_line(all: &[ModelCost]) -> Option<String> {
+    let total: f64 = all.iter().map(|model| model.cost_usd).sum();
+    (total > 0.0).then(|| format!("({})", format_cost(total)))
+}
+
+fn sum_tokens(models: &[ModelCost]) -> (u64, u64) {
+    models.iter().fold((0, 0), |(input, output), model| {
+        (input + model.input_tokens, output + model.output_tokens)
+    })
+}
+
+// Current project's total input/output token counts (across models), e.g.
+// "84K/451K tok". Token-only view, independent of the cost labels.
+fn build_project_tokens_line(current: &[ModelCost]) -> Option<String> {
+    let (input, output) = sum_tokens(current);
+    (input > 0 || output > 0)
+        .then(|| format!("{}/{} tok", format_tokens(input), format_tokens(output)))
+}
+
+// All-projects total input/output token counts, e.g. "Σ 6.5M/13.2M tok". Summed
+// over every project found in ~/.claude.json (plus the live session), so it
+// adapts to whatever projects each user actually has.
+fn build_all_tokens_line(all: &[ModelCost]) -> Option<String> {
+    let (input, output) = sum_tokens(all);
+    (input > 0 || output > 0)
+        .then(|| format!("\u{03a3} {}/{} tok", format_tokens(input), format_tokens(output)))
 }
 
 fn read_config(path: &Path) -> ClaudeConfig {
@@ -3298,6 +3791,152 @@ mod tests {
         assert_eq!(normalize_mode("watching"), "watching");
         assert_eq!(normalize_mode("tv"), "watching");
         assert_eq!(normalize_mode("unknown"), "playing");
+    }
+
+    #[test]
+    fn prices_models_by_id() {
+        assert_eq!(model_pricing("claude-opus-4-8[1m]"), Some(("Opus", 5.0, 25.0)));
+        assert_eq!(model_pricing("claude-opus-4-1-20250805"), Some(("Opus", 15.0, 75.0)));
+        assert_eq!(model_pricing("claude-sonnet-4-6"), Some(("Sonnet", 3.0, 15.0)));
+        assert_eq!(
+            model_pricing("claude-haiku-4-5-20251001"),
+            Some(("Haiku", 1.0, 5.0))
+        );
+        assert_eq!(model_pricing("claude-fable-5"), Some(("Fable", 10.0, 50.0)));
+        assert_eq!(model_pricing("gpt-4o"), None);
+    }
+
+    #[test]
+    fn sums_live_session_costs() {
+        // Two Opus turns: cache split as 5m and 1h to exercise both write rates.
+        let raw = concat!(
+            r#"{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000000,"output_tokens":1000000,"cache_read_input_tokens":1000000,"cache_creation_input_tokens":1000000,"cache_creation":{"ephemeral_5m_input_tokens":1000000,"ephemeral_1h_input_tokens":0}}}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"ignored"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":2000000,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":2000000}}}}"#,
+        );
+        let costs = session_model_costs_from_str(raw);
+        assert_eq!(costs.len(), 1);
+        let opus = &costs[0];
+        assert_eq!(opus.label, "Opus");
+        assert_eq!(opus.input_tokens, 1_000_000);
+        assert_eq!(opus.output_tokens, 1_000_000);
+        // input $5 + output $25 + cacheRead 1M*0.1*5=$0.5 + write5m 1M*1.25*5=$6.25
+        //   + write1h 2M*2*5=$20  => $56.75
+        assert!((opus.cost_usd - 56.75).abs() < 1e-6, "cost_usd was {}", opus.cost_usd);
+        assert!((opus.input_cost - 5.0).abs() < 1e-6);
+        assert!((opus.output_cost - 25.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fold_live_session_replaces_current_project_prior_run() {
+        let mc = |label: &str, input: u64, output: u64, cost: f64| ModelCost {
+            label: label.into(),
+            input_tokens: input,
+            output_tokens: output,
+            cost_usd: cost,
+            ..ModelCost::default()
+        };
+        // Rollup already includes the current project's PRIOR session: Opus is
+        // (other project 100/200 $5) + (current prior 10/20 $1); Haiku is the
+        // current project's prior session only (5/5 $0.5).
+        let all = vec![mc("Opus", 110, 220, 6.0), mc("Haiku", 5, 5, 0.5)];
+        let current_stored = vec![mc("Opus", 10, 20, 1.0), mc("Haiku", 5, 5, 0.5)];
+        let live = vec![mc("Opus", 50, 60, 3.0)];
+        let folded = fold_live_session(all, &current_stored, &live);
+        // Opus: other (100/200 $5) + live (50/60 $3), prior removed. Haiku nets to
+        // zero (live no longer uses it) so the family disappears — no double count.
+        assert_eq!(folded.len(), 1);
+        let opus = &folded[0];
+        assert_eq!(opus.label, "Opus");
+        assert_eq!(opus.input_tokens, 150);
+        assert_eq!(opus.output_tokens, 260);
+        assert!(
+            (opus.cost_usd - 8.0).abs() < 1e-9,
+            "cost_usd was {}",
+            opus.cost_usd
+        );
+    }
+
+    #[test]
+    fn fold_live_session_keeps_rollup_without_live() {
+        let mc = |label: &str, input: u64| ModelCost {
+            label: label.into(),
+            input_tokens: input,
+            ..ModelCost::default()
+        };
+        // No live session yet: the stored rollup is returned untouched so a
+        // just-opened session still shows its prior spend.
+        let folded = fold_live_session(vec![mc("Opus", 110)], &[mc("Opus", 10)], &[]);
+        assert_eq!(folded.len(), 1);
+        assert_eq!(folded[0].input_tokens, 110);
+    }
+
+    #[test]
+    fn builds_per_model_cost_line() {
+        let mc = |label: &str, input: u64, output: u64, cost: f64| ModelCost {
+            label: label.into(),
+            input_tokens: input,
+            output_tokens: output,
+            cost_usd: cost,
+            ..ModelCost::default()
+        };
+        // Current present: top-3 by spend (source is pre-sorted) plus overflow,
+        // each with input/output token counts.
+        let current = vec![
+            mc("Opus", 80_000, 362_000, 11.17),
+            mc("Sonnet", 9_000, 4_000, 0.55),
+            mc("Haiku", 369, 19, 0.23),
+            mc("Fable", 100, 50, 0.10),
+        ];
+        // Price only (per model, top-3 + overflow) — tokens belong to the token toggles.
+        assert_eq!(
+            build_cost_line(&current).as_deref(),
+            Some("Opus $11.17 · Sonnet $0.55 · Haiku $0.23 · +1")
+        );
+        // Current project only — empty current means no line (no all-projects fallback).
+        assert_eq!(build_cost_line(&[]), None);
+        assert_eq!(build_cost_line(&[mc("Opus", 0, 0, 0.0)]), None);
+    }
+
+    #[test]
+    fn builds_total_line() {
+        let mc = |label: &str, cost: f64| ModelCost {
+            label: label.into(),
+            cost_usd: cost,
+            ..ModelCost::default()
+        };
+        assert_eq!(
+            build_total_line(&[mc("Opus", 300.0), mc("Sonnet", 21.99)]).as_deref(),
+            Some("($321.99)")
+        );
+        assert_eq!(build_total_line(&[]), None);
+        assert_eq!(build_total_line(&[mc("Opus", 0.0)]), None);
+    }
+
+    #[test]
+    fn builds_token_lines() {
+        let mc = |label: &str, input: u64, output: u64| ModelCost {
+            label: label.into(),
+            input_tokens: input,
+            output_tokens: output,
+            ..ModelCost::default()
+        };
+        // Project line sums tokens across models (no $).
+        let current = vec![mc("Opus", 80_000, 360_000), mc("Sonnet", 4_000, 2_000)];
+        assert_eq!(
+            build_project_tokens_line(&current).as_deref(),
+            Some("84K/362K tok")
+        );
+        // All line sums everything and prefixes with sigma; millions render as M.
+        let all = vec![mc("Opus", 5_000_000, 13_200_000), mc("Haiku", 500_000, 0)];
+        assert_eq!(
+            build_all_tokens_line(&all).as_deref(),
+            Some("\u{03a3} 5.5M/13.2M tok")
+        );
+        assert_eq!(build_project_tokens_line(&[]), None);
+        assert_eq!(build_all_tokens_line(&[mc("Opus", 0, 0)]), None);
     }
 
     #[test]

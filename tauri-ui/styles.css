@@ -63,8 +63,9 @@ body[data-theme="light"] {
 body {
   margin: 0;
   height: 100vh;
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-sans);
@@ -82,7 +83,9 @@ select {
 
 .shell {
   width: 100%;
-  min-height: 100vh;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   padding: 20px 28px 24px;
   background: var(--bg);
   max-width: 640px;
@@ -445,7 +448,7 @@ button:disabled {
 
 .rpc-info-controls {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
   gap: 8px;
 }
 
@@ -485,6 +488,98 @@ button:disabled {
 .limit-controls #refresh-limits {
   flex: 0 0 auto;
   margin-left: auto;
+}
+
+/* Usage cost panel */
+.cost-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.cost-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cost-group-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.cost-row {
+  display: grid;
+  grid-template-columns: minmax(60px, max-content) minmax(56px, max-content) 1fr;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.cost-model {
+  font-weight: 600;
+}
+
+.cost-amount {
+  font-weight: 600;
+  color: var(--primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.cost-detail {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cost-empty {
+  color: var(--muted);
+}
+
+.cost-total {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.cost-total-label {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.cost-total-right {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.cost-total-tokens {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cost-total-amount {
+  font-weight: 700;
+  color: var(--primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.cost-note {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 /* RPC Preview panel */
@@ -706,4 +801,58 @@ footer {
 .ghost:hover:not(:disabled) {
   background: var(--button);
   border-color: var(--line);
+}
+
+/* Custom window title bar */
+.titlebar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 32px;
+  padding-left: 12px;
+  background: var(--bg);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.titlebar-logo {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  pointer-events: none; /* clicks fall through to the bar => drag */
+}
+
+.titlebar-controls {
+  display: flex;
+  align-self: stretch;
+}
+
+.titlebar-button {
+  width: 46px;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+}
+
+.titlebar-button:hover:not(:disabled) {
+  background: var(--button-hover);
+  border: 0;
+  color: var(--text);
+  transform: none; /* override the global button hover lift */
+}
+
+.titlebar-button:active:not(:disabled) {
+  transform: none;
+}
+
+.titlebar-button.close:hover:not(:disabled) {
+  background: #e81123;
+  color: #ffffff;
 }

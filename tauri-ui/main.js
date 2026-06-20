@@ -1,4 +1,5 @@
 const invoke = window.__TAURI__.core.invoke;
+const appWindow = window.__TAURI__.window.getCurrentWindow();
 
 const presets = {
   claude: ['Claude', 'https://claude.ai'],
@@ -13,6 +14,12 @@ const fields = {
   providerToggle: document.querySelector('#provider-toggle'),
   effortToggle: document.querySelector('#effort-toggle'),
   sessionTitleToggle: document.querySelector('#session-title-toggle'),
+  costToggle: document.querySelector('#cost-toggle'),
+  costTotalToggle: document.querySelector('#cost-total-toggle'),
+  projectTokensToggle: document.querySelector('#project-tokens-toggle'),
+  allTokensToggle: document.querySelector('#all-tokens-toggle'),
+  costPanel: document.querySelector('.cost-panel'),
+  costBody: document.querySelector('#cost-body'),
   limitsToggle: document.querySelector('#limits-toggle'),
   limit5hToggle: document.querySelector('#limit-5h-toggle'),
   limitAllToggle: document.querySelector('#limit-all-toggle'),
@@ -63,6 +70,10 @@ function readForm() {
     showProvider: fields.providerToggle.dataset.enabled === 'true',
     showEffort: fields.effortToggle.dataset.enabled === 'true',
     showSessionTitle: fields.sessionTitleToggle.dataset.enabled === 'true',
+    showCost: fields.costToggle.dataset.enabled === 'true',
+    showCostTotal: fields.costTotalToggle.dataset.enabled === 'true',
+    showProjectTokens: fields.projectTokensToggle.dataset.enabled === 'true',
+    showAllTokens: fields.allTokensToggle.dataset.enabled === 'true',
     verbose: fields.debugToggle.dataset.enabled === 'true',
     rpcMode: fields.mode.value,
     buttons,
@@ -77,6 +88,10 @@ function writeForm(config) {
   syncToggle(fields.providerToggle, currentConfig.showProvider !== false, 'Provider', '', '');
   syncToggle(fields.effortToggle, currentConfig.showEffort !== false, 'Effort', '', '');
   syncToggle(fields.sessionTitleToggle, currentConfig.showSessionTitle !== false, 'Session title', '', '');
+  syncToggle(fields.costToggle, currentConfig.showCost === true, 'Cost', '', '');
+  syncToggle(fields.costTotalToggle, currentConfig.showCostTotal === true, 'Total', '', '');
+  syncToggle(fields.projectTokensToggle, currentConfig.showProjectTokens === true, 'Proj tokens', '', '');
+  syncToggle(fields.allTokensToggle, currentConfig.showAllTokens === true, 'All tokens', '', '');
   syncToggle(fields.limitsToggle, currentConfig.showLimits !== false, '', 'Shown', 'Hidden');
   syncToggle(fields.limit5hToggle, currentConfig.showLimit5h !== false, '5h', '', '');
   syncToggle(fields.limitAllToggle, currentConfig.showLimitAll !== false, 'All', '', '');
@@ -196,6 +211,10 @@ function formatStatus(status) {
     status.claudeLine,
     formatModelForRpc(status.modelLine, config.showEffort !== false),
     config.showProvider !== false ? status.providerLine : '',
+    config.showCost === true ? status.costLine || '' : '',
+    config.showProjectTokens === true ? status.projectTokensLine || '' : '',
+    config.showCostTotal === true ? status.costTotalLine || '' : '',
+    config.showAllTokens === true ? status.allTokensLine || '' : '',
     status.discordLine,
   ]
     .concat([config.showLimits !== false ? status.limitsLine : '', status.debugLine])
@@ -233,6 +252,7 @@ function updatePreview() {
   fields.previewTertiary.title = playing ? limitsTip : '';
   renderPreviewButtons(daemonMode, config.buttons || []);
   updateSectionSummaries(config);
+  renderCost(config);
 }
 
 // Mirror the mode the daemon actually rendered (from its preview header) so the
@@ -266,8 +286,99 @@ function updateSectionSummaries(config) {
   };
   document.querySelectorAll('.panel[data-section]').forEach((panel) => {
     const span = panel.querySelector('.legend-summary');
-    if (span) span.textContent = summaries[panel.dataset.section] || '';
+    // Leave sections without a summary key (e.g. cost) untouched so their own
+    // renderer can own that label.
+    if (span && panel.dataset.section in summaries) {
+      span.textContent = summaries[panel.dataset.section] || '';
+    }
   });
+}
+
+function renderCost(config) {
+  // Panel stays in Settings whenever any cost/token label is active — not tied to
+  // the Cost toggle specifically (e.g. Total on, Cost off still shows the panel).
+  const show =
+    config.showCost === true ||
+    config.showCostTotal === true ||
+    config.showProjectTokens === true ||
+    config.showAllTokens === true;
+  fields.costPanel.hidden = !show;
+  if (!show) return;
+  const all = Array.isArray(currentStatus.modelCostsAll) ? currentStatus.modelCostsAll : [];
+  const current = Array.isArray(currentStatus.modelCostsCurrent)
+    ? currentStatus.modelCostsCurrent
+    : [];
+  fields.costBody.replaceChildren(
+    costGroup('Current session', current),
+    costGroup('All projects', all),
+  );
+  const total = all.reduce((sum, model) => sum + (model.costUsd || 0), 0);
+  const summary = fields.costPanel.querySelector('.legend-summary');
+  if (summary) summary.textContent = all.length ? `${formatUsd(total)} total` : 'No usage yet';
+}
+
+function costGroup(title, models) {
+  const wrap = document.createElement('div');
+  wrap.className = 'cost-group';
+  const head = document.createElement('div');
+  head.className = 'cost-group-title';
+  head.textContent = title;
+  wrap.appendChild(head);
+  if (!models.length) {
+    const empty = document.createElement('div');
+    empty.className = 'cost-empty';
+    empty.textContent = '—';
+    wrap.appendChild(empty);
+    return wrap;
+  }
+  for (const model of models) {
+    const row = document.createElement('div');
+    row.className = 'cost-row';
+    const name = document.createElement('span');
+    name.className = 'cost-model';
+    name.textContent = model.label;
+    const amount = document.createElement('span');
+    amount.className = 'cost-amount';
+    amount.textContent = formatUsd(model.costUsd || 0);
+    const detail = document.createElement('span');
+    detail.className = 'cost-detail';
+    detail.textContent =
+      `in ${formatTokens(model.inputTokens || 0)} (${formatUsd(model.inputCost || 0)})` +
+      ` · out ${formatTokens(model.outputTokens || 0)} (${formatUsd(model.outputCost || 0)})`;
+    row.append(name, amount, detail);
+    wrap.appendChild(row);
+  }
+  const total = models.reduce((sum, model) => sum + (model.costUsd || 0), 0);
+  const totalIn = models.reduce((sum, model) => sum + (model.inputTokens || 0), 0);
+  const totalOut = models.reduce((sum, model) => sum + (model.outputTokens || 0), 0);
+  const totalRow = document.createElement('div');
+  totalRow.className = 'cost-total';
+  const totalLabel = document.createElement('span');
+  totalLabel.className = 'cost-total-label';
+  totalLabel.textContent = 'Total';
+  const totalRight = document.createElement('span');
+  totalRight.className = 'cost-total-right';
+  const totalTokens = document.createElement('span');
+  totalTokens.className = 'cost-total-tokens';
+  totalTokens.textContent = `${formatTokens(totalIn)}/${formatTokens(totalOut)} tok`;
+  const totalAmount = document.createElement('span');
+  totalAmount.className = 'cost-total-amount';
+  totalAmount.textContent = formatUsd(total);
+  totalRight.append(totalTokens, totalAmount);
+  totalRow.append(totalLabel, totalRight);
+  wrap.appendChild(totalRow);
+  return wrap;
+}
+
+function formatUsd(value) {
+  return `$${(value || 0).toFixed(2)}`;
+}
+
+function formatTokens(count) {
+  const n = count || 0;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(0)}K`;
+  return String(n);
 }
 
 function formatModelForRpc(model, showEffort) {
@@ -314,6 +425,10 @@ function scheduleSave() {
 
 document.querySelector('#apply').addEventListener('click', () => save());
 document.querySelector('#close').addEventListener('click', () => invoke('close_settings'));
+document.querySelector('#titlebar-minimize').addEventListener('click', () => appWindow.minimize());
+document.querySelector('#titlebar-maximize').addEventListener('click', () => appWindow.toggleMaximize());
+// Close button mirrors the footer Close / native X: hide to tray, never kill the daemon.
+document.querySelector('#titlebar-close').addEventListener('click', () => invoke('close_settings'));
 fields.refreshLimits.addEventListener('click', refreshLimits);
 document.querySelector('#clear').addEventListener('click', () => {
   for (const input of [...fields.labels, ...fields.urls]) input.value = '';
@@ -331,12 +446,37 @@ fields.idleToggle.addEventListener('click', () => {
   syncToggle(fields.idleToggle, fields.idleToggle.dataset.enabled !== 'true', 'Idle', 'on', 'off');
   scheduleSave();
 });
-[fields.providerToggle, fields.effortToggle, fields.sessionTitleToggle].forEach((button) => {
-  button.addEventListener('click', () => {
-    syncToggle(button, button.dataset.enabled !== 'true', button.textContent, '', '');
-    scheduleSave();
-  });
-});
+// Current-project vs all-projects variants are mutually exclusive so the Discord
+// line never stacks the same metric at both scopes: Cost (current $) ⟷ Total
+// (all $), and Proj tokens (current) ⟷ All tokens (all).
+const exclusiveToggles = new Map([
+  [fields.costToggle, fields.costTotalToggle],
+  [fields.costTotalToggle, fields.costToggle],
+  [fields.projectTokensToggle, fields.allTokensToggle],
+  [fields.allTokensToggle, fields.projectTokensToggle],
+]);
+
+[
+  fields.providerToggle,
+  fields.effortToggle,
+  fields.sessionTitleToggle,
+  fields.costToggle,
+  fields.costTotalToggle,
+  fields.projectTokensToggle,
+  fields.allTokensToggle,
+].forEach(
+  (button) => {
+    button.addEventListener('click', () => {
+      const enabled = button.dataset.enabled !== 'true';
+      syncToggle(button, enabled, button.textContent, '', '');
+      const partner = exclusiveToggles.get(button);
+      if (enabled && partner) {
+        syncToggle(partner, false, partner.textContent, '', '');
+      }
+      scheduleSave();
+    });
+  },
+);
 fields.limitsToggle.addEventListener('click', () => {
   syncToggle(
     fields.limitsToggle,
@@ -404,7 +544,8 @@ function initSections() {
     };
 
     const stored = localStorage.getItem(key);
-    const expandedByDefault = panel.dataset.section === 'preview';
+    const expandedByDefault =
+      panel.dataset.section === 'preview' || panel.dataset.section === 'cost';
     sync(stored ? stored !== 'collapsed' : expandedByDefault);
     button.addEventListener('click', () => {
       const expanded = button.getAttribute('aria-expanded') !== 'true';
