@@ -468,7 +468,7 @@ button:disabled {
   min-width: 132px;
 }
 
-/* The 5h / All / Sonnet only / Design filters are multi-select chips, not
+/* The 5h / All / Sonnet only filters are multi-select chips, not
    switches: drop the switch pseudo-elements (the source of the overlap) and size
    each chip to its label. Active state is shown via the .toggle.active fill. */
 .limit-controls .compact {

@@ -1,5 +1,16 @@
 # Changelog
 
+## v3.6.0 (2026-07-07)
+
+### Changed
+- **Internal restructure**: the daemon is now split into focused modules — `daemon/ipc.rs` (Discord IPC transport), `daemon/usage.rs` (costs, usage limits, OAuth) and `daemon/mod.rs` (detection/presence) — instead of a single 4,300-line file. No behavior change.
+- **Single shared config model**: `ClaudeConfig` now lives in one shared `config.rs` used by both the tray app and the daemon, eliminating the duplicated-struct drift that previously caused saved settings to be silently wiped (the `show_idle` bug class).
+- **Zero-warning policy**: the codebase is clippy-clean (macOS-only helpers are properly `#[cfg]`-gated, dead cross-platform stubs removed) and CI now enforces `cargo fmt --check` and `cargo clippy -D warnings` so warnings can't accumulate again.
+
+### Fixed
+- Stale UI comment still referencing the removed `Design` usage-limit filter.
+
+
 ## v3.5.0 (2026-06-20)
 
 ### Added

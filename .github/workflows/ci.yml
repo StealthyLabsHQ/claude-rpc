@@ -18,9 +18,17 @@ jobs:
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
       - run: npm ci
 
       - run: node --check tauri-ui/main.js
+
+      - run: cargo fmt --check
+        working-directory: src-tauri
+
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: src-tauri
 
       - run: npm test

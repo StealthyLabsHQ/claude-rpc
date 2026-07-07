@@ -39,3 +39,7 @@ Thumbs.db
 
 # Build logs
 py_build*.log
+
+# Local project memory + unrelated assets
+REMNANT.md
+Codex.png

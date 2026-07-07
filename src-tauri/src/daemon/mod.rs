@@ -1,9 +1,15 @@
-use serde::{Deserialize, Serialize};
+mod ipc;
+mod usage;
+
+pub(crate) use ipc::*;
+pub(crate) use usage::*;
+
+use crate::config::{normalize_mode, read_config, ClaudeConfig};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     fs::{self, File},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -12,11 +18,6 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-
-#[cfg(windows)]
-use std::fs::OpenOptions;
-#[cfg(unix)]
-use std::os::unix::net::UnixStream;
 
 #[cfg(windows)]
 use windows::{
@@ -32,7 +33,6 @@ use windows::{
                 CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
                 TH32CS_SNAPPROCESS,
             },
-            Pipes::PeekNamedPipe,
             Threading::{
                 GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
                 PROCESS_QUERY_LIMITED_INFORMATION,
@@ -52,84 +52,11 @@ use windows::{
 const DEFAULT_DISCORD_CLIENT_ID: &str = "1483898157854363799";
 const SCAN_INTERVAL_MS: u64 = 250;
 const RPC_REFRESH_INTERVAL_MS: u64 = 15_000;
-const IPC_READ_TIMEOUT_MS: u64 = 5_000;
 const IDLE_GRACE_MS: u64 = 10_000;
-const LIMITS_CACHE_MS: u64 = 6 * 60 * 60 * 1_000;
-// A per-bucket percentage is only shown as current if it was refreshed within
-// this window. Kept below the shortest usage window (5h) so a stale value can
-// never outlive its own reset; OAuth re-polls well within it (<=10 min idle).
-const LIMITS_DISPLAY_TTL_MS: u64 = 60 * 60 * 1_000;
 const ACTIVITY_PLAYING: u8 = 0;
 const ACTIVITY_LISTENING: u8 = 2;
 const ACTIVITY_WATCHING: u8 = 3;
 const ACTIVITY_COMPETING: u8 = 5;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RpcButton {
-    label: String,
-    url: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeConfig {
-    #[serde(default)]
-    dnd: bool,
-    #[serde(default = "default_show_limits")]
-    show_limits: bool,
-    #[serde(default = "default_show_limits")]
-    show_limit_5h: bool,
-    #[serde(default = "default_show_limits")]
-    show_limit_all: bool,
-    #[serde(default = "default_show_limits")]
-    show_limit_sonnet: bool,
-    #[serde(default = "default_show_limits")]
-    show_provider: bool,
-    #[serde(default = "default_show_limits")]
-    show_effort: bool,
-    #[serde(default = "default_show_limits")]
-    show_session_title: bool,
-    #[serde(default)]
-    show_cost: bool,
-    #[serde(default)]
-    show_cost_total: bool,
-    #[serde(default)]
-    show_project_tokens: bool,
-    #[serde(default)]
-    show_all_tokens: bool,
-    #[serde(default)]
-    show_idle: bool,
-    #[serde(default)]
-    verbose: bool,
-    #[serde(default = "default_rpc_mode")]
-    rpc_mode: String,
-    #[serde(default = "default_buttons")]
-    buttons: Vec<RpcButton>,
-}
-
-impl Default for ClaudeConfig {
-    fn default() -> Self {
-        Self {
-            dnd: false,
-            show_limits: default_show_limits(),
-            show_limit_5h: default_show_limits(),
-            show_limit_all: default_show_limits(),
-            show_limit_sonnet: default_show_limits(),
-            show_provider: default_show_limits(),
-            show_effort: default_show_limits(),
-            show_session_title: default_show_limits(),
-            show_cost: false,
-            show_cost_total: false,
-            show_project_tokens: false,
-            show_all_tokens: false,
-            show_idle: false,
-            verbose: false,
-            rpc_mode: default_rpc_mode(),
-            buttons: default_buttons(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClientType {
@@ -200,7 +127,7 @@ struct SessionInfo {
 }
 
 #[derive(Default)]
-struct StateMachine {
+pub(crate) struct StateMachine {
     last_non_idle: Option<DetectionResult>,
     last_non_idle_at_ms: u64,
     cached_limits: Vec<UsageLimitEntry>,
@@ -247,55 +174,6 @@ struct DesktopModelCandidate {
     adaptive: bool,
     extended: bool,
     effort: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct UsageLimitEntry {
-    label: String,
-    used_percent: u8,
-    reset: Option<String>,
-    // When this bucket's percentage was last observed. Stamped per-entry in
-    // merge_limit_entries so a bucket absent from a later (partial) detection is
-    // not re-marked fresh, and can be expired individually past its window.
-    #[serde(default)]
-    updated_at_ms: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct LimitsCache {
-    updated_at: u64,
-    limits: Vec<UsageLimitEntry>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct LimitVisibility {
-    enabled: bool,
-    show_5h: bool,
-    show_all: bool,
-    show_sonnet: bool,
-}
-
-// Per-model usage rolled up by model family (Opus/Sonnet/Haiku/Fable). `cost_usd`
-// is Claude Code's own figure (cache-aware) summed across the family's snapshots;
-// `input_cost`/`output_cost` are the table-rate breakdown of the input/output
-// tokens (no cache), so the UI can show both the real spend and the in/out split.
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ModelCost {
-    label: String,
-    input_tokens: u64,
-    output_tokens: u64,
-    cache_read_tokens: u64,
-    cache_creation_tokens: u64,
-    input_cost: f64,
-    output_cost: f64,
-    cost_usd: f64,
-}
-
-#[derive(Debug, Clone)]
-struct ProjectUsage {
-    path_norm: String,
-    models: Vec<ModelCost>,
 }
 
 pub fn run(
@@ -844,444 +722,6 @@ fn presence_key(result: &DetectionResult, config: &ClaudeConfig) -> String {
     .unwrap_or_default()
 }
 
-fn limit_visibility(config: &ClaudeConfig) -> LimitVisibility {
-    LimitVisibility {
-        enabled: config.show_limits,
-        show_5h: config.show_limit_5h,
-        show_all: config.show_limit_all,
-        show_sonnet: config.show_limit_sonnet,
-    }
-}
-
-// Cost/token data must be gathered whenever any cost- or token-related Discord
-// label (or the Settings panel) is on.
-fn cost_enabled(config: &ClaudeConfig) -> bool {
-    config.show_cost
-        || config.show_cost_total
-        || config.show_project_tokens
-        || config.show_all_tokens
-}
-
-// Per-million input/output rates from the published model pricing
-// (platform.claude.com/docs/.../models/overview). Returns the family label used
-// to roll up snapshots and to match the active model for the Discord summary.
-fn model_pricing(model_id: &str) -> Option<(&'static str, f64, f64)> {
-    let id = model_id.to_ascii_lowercase();
-    // Snapshot ids carry suffixes like "[1m]"; classify on the bare id.
-    let base = id.split('[').next().unwrap_or(id.as_str());
-    if base.contains("fable") || base.contains("mythos") {
-        Some(("Fable", 10.0, 50.0))
-    } else if base.contains("haiku") {
-        Some(("Haiku", 1.0, 5.0))
-    } else if base.contains("sonnet") {
-        Some(("Sonnet", 3.0, 15.0))
-    } else if base.contains("opus") {
-        // Opus 4.1 is the lone $15/$75 tier; 4.5/4.6/4.7/4.8 are all $5/$25.
-        if base.contains("opus-4-1-") || base.ends_with("opus-4-1") {
-            Some(("Opus", 15.0, 75.0))
-        } else {
-            Some(("Opus", 5.0, 25.0))
-        }
-    } else {
-        None
-    }
-}
-
-fn normalize_project_path(path: &str) -> String {
-    path.replace('\\', "/").to_ascii_lowercase()
-}
-
-fn format_cost(value: f64) -> String {
-    format!("${value:.2}")
-}
-
-fn format_tokens(count: u64) -> String {
-    if count >= 1_000_000 {
-        format!("{:.1}M", count as f64 / 1_000_000.0)
-    } else if count >= 1_000 {
-        format!("{:.0}K", count as f64 / 1_000.0)
-    } else {
-        count.to_string()
-    }
-}
-
-fn sort_costs(models: &mut [ModelCost]) {
-    models.sort_by(|a, b| {
-        b.cost_usd
-            .partial_cmp(&a.cost_usd)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-}
-
-fn add_cost(bucket: &mut ModelCost, model: &ModelCost) {
-    bucket.input_tokens += model.input_tokens;
-    bucket.output_tokens += model.output_tokens;
-    bucket.cache_read_tokens += model.cache_read_tokens;
-    bucket.cache_creation_tokens += model.cache_creation_tokens;
-    bucket.input_cost += model.input_cost;
-    bucket.output_cost += model.output_cost;
-    bucket.cost_usd += model.cost_usd;
-}
-
-// Inverse of add_cost: remove a snapshot already folded into the bucket. Tokens
-// use saturating_sub and costs are floored at 0 since the subtrahend is always a
-// subset of the bucket, so the result can't legitimately go negative.
-fn sub_cost(bucket: &mut ModelCost, model: &ModelCost) {
-    bucket.input_tokens = bucket.input_tokens.saturating_sub(model.input_tokens);
-    bucket.output_tokens = bucket.output_tokens.saturating_sub(model.output_tokens);
-    bucket.cache_read_tokens = bucket.cache_read_tokens.saturating_sub(model.cache_read_tokens);
-    bucket.cache_creation_tokens = bucket
-        .cache_creation_tokens
-        .saturating_sub(model.cache_creation_tokens);
-    bucket.input_cost = (bucket.input_cost - model.input_cost).max(0.0);
-    bucket.output_cost = (bucket.output_cost - model.output_cost).max(0.0);
-    bucket.cost_usd = (bucket.cost_usd - model.cost_usd).max(0.0);
-}
-
-// Merge the live in-progress session into the all-projects rollup. The active
-// project's stored lastModelUsage (`current_stored`, already inside `all`) is
-// subtracted before the live session is added, so a running project that also
-// had a prior completed session isn't counted twice (prior + live). With no live
-// session the rollup is returned unchanged, so a just-opened session keeps
-// showing its prior spend until the first turn lands.
-fn fold_live_session(
-    all: Vec<ModelCost>,
-    current_stored: &[ModelCost],
-    current: &[ModelCost],
-) -> Vec<ModelCost> {
-    if current.is_empty() {
-        return all;
-    }
-    let mut merged: HashMap<String, ModelCost> = HashMap::new();
-    for model in &all {
-        let bucket = merged.entry(model.label.clone()).or_insert_with(|| ModelCost {
-            label: model.label.clone(),
-            ..ModelCost::default()
-        });
-        add_cost(bucket, model);
-    }
-    for model in current_stored {
-        if let Some(bucket) = merged.get_mut(&model.label) {
-            sub_cost(bucket, model);
-        }
-    }
-    for model in current {
-        let bucket = merged.entry(model.label.clone()).or_insert_with(|| ModelCost {
-            label: model.label.clone(),
-            ..ModelCost::default()
-        });
-        add_cost(bucket, model);
-    }
-    // Drop families that netted to exactly zero: a prior-session family of the
-    // current project that the live session no longer uses.
-    let mut all: Vec<ModelCost> = merged
-        .into_values()
-        .filter(|model| {
-            model.input_tokens > 0
-                || model.output_tokens > 0
-                || model.cache_read_tokens > 0
-                || model.cache_creation_tokens > 0
-        })
-        .collect();
-    sort_costs(&mut all);
-    all
-}
-
-// Parse ~/.claude.json once into per-project, per-family rollups. Cheap to
-// aggregate afterwards; the parse itself is gated behind an mtime cache.
-fn read_project_usages() -> Vec<ProjectUsage> {
-    let raw = match fs::read_to_string(home_dir().join(".claude.json")) {
-        Ok(raw) => raw,
-        Err(_) => return Vec::new(),
-    };
-    let value: Value = match serde_json::from_str(raw.trim_start_matches('\u{feff}')) {
-        Ok(value) => value,
-        Err(_) => return Vec::new(),
-    };
-    let Some(projects) = value.get("projects").and_then(Value::as_object) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for (path, project) in projects {
-        let Some(usage) = project.get("lastModelUsage").and_then(Value::as_object) else {
-            continue;
-        };
-        let mut by_family: HashMap<&'static str, ModelCost> = HashMap::new();
-        for (model_id, entry) in usage {
-            let Some((label, input_rate, output_rate)) = model_pricing(model_id) else {
-                continue;
-            };
-            let input = entry.get("inputTokens").and_then(Value::as_u64).unwrap_or(0);
-            let output = entry
-                .get("outputTokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let cache_read = entry
-                .get("cacheReadInputTokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let cache_creation = entry
-                .get("cacheCreationInputTokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let cost = entry.get("costUSD").and_then(Value::as_f64).unwrap_or(0.0);
-            let bucket = by_family.entry(label).or_insert_with(|| ModelCost {
-                label: label.to_string(),
-                ..ModelCost::default()
-            });
-            bucket.input_tokens += input;
-            bucket.output_tokens += output;
-            bucket.cache_read_tokens += cache_read;
-            bucket.cache_creation_tokens += cache_creation;
-            bucket.input_cost += input as f64 / 1_000_000.0 * input_rate;
-            bucket.output_cost += output as f64 / 1_000_000.0 * output_rate;
-            bucket.cost_usd += cost;
-        }
-        if by_family.is_empty() {
-            continue;
-        }
-        let mut models: Vec<ModelCost> = by_family.into_values().collect();
-        sort_costs(&mut models);
-        out.push(ProjectUsage {
-            path_norm: normalize_project_path(path),
-            models,
-        });
-    }
-    out
-}
-
-fn project_usages(machine: &mut StateMachine) -> &[ProjectUsage] {
-    let path = home_dir().join(".claude.json");
-    let mtime = modified_ms(&path).unwrap_or(0);
-    if machine.cached_project_usages.is_none() || machine.cached_project_usages_mtime != mtime {
-        machine.cached_project_usages = Some(read_project_usages());
-        machine.cached_project_usages_mtime = mtime;
-    }
-    machine.cached_project_usages.as_deref().unwrap_or(&[])
-}
-
-// Returns (all projects combined, current project) rolled up per model family.
-fn aggregate_costs(usages: &[ProjectUsage], cwd: Option<&str>) -> (Vec<ModelCost>, Vec<ModelCost>) {
-    let mut all: HashMap<String, ModelCost> = HashMap::new();
-    for usage in usages {
-        for model in &usage.models {
-            let bucket = all.entry(model.label.clone()).or_insert_with(|| ModelCost {
-                label: model.label.clone(),
-                ..ModelCost::default()
-            });
-            add_cost(bucket, model);
-        }
-    }
-    let mut all: Vec<ModelCost> = all.into_values().collect();
-    sort_costs(&mut all);
-
-    let current = cwd
-        .map(normalize_project_path)
-        .and_then(|target| usages.iter().find(|usage| usage.path_norm == target))
-        .map(|usage| usage.models.clone())
-        .unwrap_or_default();
-
-    (all, current)
-}
-
-// Standard prompt-caching multipliers over the model's base input rate:
-// reads are 0.1x, 5-minute cache writes 1.25x, 1-hour cache writes 2x.
-const CACHE_READ_MULT: f64 = 0.1;
-const CACHE_WRITE_5M_MULT: f64 = 1.25;
-const CACHE_WRITE_1H_MULT: f64 = 2.0;
-
-// Live per-model cost for the in-progress session, summed straight from the
-// session .jsonl. Needed because ~/.claude.json only records per-project usage
-// (lastModelUsage / lastCost) at session end, so a running session shows nothing
-// there. Each assistant turn carries message.usage; cost_usd is computed locally
-// (input/output at table rate plus cache reads/writes at the standard multipliers)
-// since Claude's own costUSD isn't written until the session closes.
-fn session_model_costs(path: &Path) -> Vec<ModelCost> {
-    match fs::read_to_string(path) {
-        Ok(raw) => session_model_costs_from_str(&raw),
-        Err(_) => Vec::new(),
-    }
-}
-
-fn session_model_costs_from_str(raw: &str) -> Vec<ModelCost> {
-    let mut by_family: HashMap<&'static str, ModelCost> = HashMap::new();
-    for line in raw.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let entry: Value = match serde_json::from_str(line) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        if entry.get("type").and_then(Value::as_str) != Some("assistant") {
-            continue;
-        }
-        let Some(message) = entry.get("message") else {
-            continue;
-        };
-        let Some(usage) = message.get("usage") else {
-            continue;
-        };
-        let model_id = message.get("model").and_then(Value::as_str).unwrap_or("");
-        let Some((label, input_rate, output_rate)) = model_pricing(model_id) else {
-            continue;
-        };
-        let tok = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
-        let input = tok("input_tokens");
-        let output = tok("output_tokens");
-        let cache_read = tok("cache_read_input_tokens");
-        let cache_creation = tok("cache_creation_input_tokens");
-        // Split cache writes into 5m vs 1h when the breakdown is present; otherwise
-        // treat the whole creation bucket as 5m.
-        let (write_5m, write_1h) = match usage.get("cache_creation") {
-            Some(detail) => {
-                let f = |key: &str| detail.get(key).and_then(Value::as_u64).unwrap_or(0);
-                let (w5, w1) = (f("ephemeral_5m_input_tokens"), f("ephemeral_1h_input_tokens"));
-                if w5 + w1 == 0 {
-                    (cache_creation, 0)
-                } else {
-                    (w5, w1)
-                }
-            }
-            None => (cache_creation, 0),
-        };
-
-        let input_cost = input as f64 / 1_000_000.0 * input_rate;
-        let output_cost = output as f64 / 1_000_000.0 * output_rate;
-        let cache_cost = (cache_read as f64 * CACHE_READ_MULT
-            + write_5m as f64 * CACHE_WRITE_5M_MULT
-            + write_1h as f64 * CACHE_WRITE_1H_MULT)
-            / 1_000_000.0
-            * input_rate;
-
-        let bucket = by_family.entry(label).or_insert_with(|| ModelCost {
-            label: label.to_string(),
-            ..ModelCost::default()
-        });
-        bucket.input_tokens += input;
-        bucket.output_tokens += output;
-        bucket.cache_read_tokens += cache_read;
-        bucket.cache_creation_tokens += cache_creation;
-        bucket.input_cost += input_cost;
-        bucket.output_cost += output_cost;
-        bucket.cost_usd += input_cost + output_cost + cache_cost;
-    }
-    let mut models: Vec<ModelCost> = by_family.into_values().collect();
-    sort_costs(&mut models);
-    models
-}
-
-fn session_costs(machine: &mut StateMachine, path: &Path) -> Vec<ModelCost> {
-    let mtime = modified_ms(path).unwrap_or(0);
-    if machine.cached_session_costs.is_none()
-        || machine.cached_session_costs_file.as_deref() != Some(path)
-        || machine.cached_session_costs_mtime != mtime
-    {
-        machine.cached_session_costs = Some(session_model_costs(path));
-        machine.cached_session_costs_file = Some(path.to_path_buf());
-        machine.cached_session_costs_mtime = mtime;
-    }
-    machine.cached_session_costs.clone().unwrap_or_default()
-}
-
-// Compact per-model price summary for the current project/session only, e.g.
-// "Opus $81.57 · Sonnet $0.55 · +1". Price only — token counts come from the
-// separate Proj/All tokens toggles, so Cost never duplicates the token labels.
-fn build_cost_line(current: &[ModelCost]) -> Option<String> {
-    let positives: Vec<&ModelCost> = current.iter().filter(|model| model.cost_usd > 0.0).collect();
-    if positives.is_empty() {
-        return None;
-    }
-    const TOP: usize = 3;
-    let mut parts: Vec<String> = positives
-        .iter()
-        .take(TOP)
-        .map(|model| format!("{} {}", model.label, format_cost(model.cost_usd)))
-        .collect();
-    if positives.len() > TOP {
-        parts.push(format!("+{}", positives.len() - TOP));
-    }
-    Some(parts.join(" · "))
-}
-
-// All-projects grand total in parentheses for the Discord line, e.g. "($321.99)".
-// Gated by its own toggle so it can be shown independently of the per-model line.
-fn build_total_line(all: &[ModelCost]) -> Option<String> {
-    let total: f64 = all.iter().map(|model| model.cost_usd).sum();
-    (total > 0.0).then(|| format!("({})", format_cost(total)))
-}
-
-fn sum_tokens(models: &[ModelCost]) -> (u64, u64) {
-    models.iter().fold((0, 0), |(input, output), model| {
-        (input + model.input_tokens, output + model.output_tokens)
-    })
-}
-
-// Current project's total input/output token counts (across models), e.g.
-// "84K/451K tok". Token-only view, independent of the cost labels.
-fn build_project_tokens_line(current: &[ModelCost]) -> Option<String> {
-    let (input, output) = sum_tokens(current);
-    (input > 0 || output > 0)
-        .then(|| format!("{}/{} tok", format_tokens(input), format_tokens(output)))
-}
-
-// All-projects total input/output token counts, e.g. "Σ 6.5M/13.2M tok". Summed
-// over every project found in ~/.claude.json (plus the live session), so it
-// adapts to whatever projects each user actually has.
-fn build_all_tokens_line(all: &[ModelCost]) -> Option<String> {
-    let (input, output) = sum_tokens(all);
-    (input > 0 || output > 0)
-        .then(|| format!("\u{03a3} {}/{} tok", format_tokens(input), format_tokens(output)))
-}
-
-fn read_config(path: &Path) -> ClaudeConfig {
-    let raw = match fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(_) => return ClaudeConfig::default(),
-    };
-    normalize_config(
-        serde_json::from_str::<ClaudeConfig>(raw.trim_start_matches('\u{feff}'))
-            .unwrap_or_default(),
-    )
-}
-
-fn normalize_config(mut config: ClaudeConfig) -> ClaudeConfig {
-    config.rpc_mode = normalize_mode(&config.rpc_mode);
-    config.buttons = config
-        .buttons
-        .into_iter()
-        .filter_map(|button| {
-            let label = clean_label(&button.label)?;
-            let url = clean_url(&button.url)?;
-            Some(RpcButton { label, url })
-        })
-        .take(2)
-        .collect();
-    config
-}
-
-fn default_show_limits() -> bool {
-    true
-}
-
-fn default_rpc_mode() -> String {
-    "playing".into()
-}
-
-fn default_buttons() -> Vec<RpcButton> {
-    vec![
-        RpcButton {
-            label: "Claude".into(),
-            url: "https://claude.ai".into(),
-        },
-        RpcButton {
-            label: "GitHub Repo".into(),
-            url: "https://github.com/stealthsrc/claude-rpc".into(),
-        },
-    ]
-}
-
 #[cfg(windows)]
 fn scan_claude_processes() -> Vec<ProcessSnapshot> {
     list_process_entries()
@@ -1361,8 +801,10 @@ fn list_process_entries() -> Vec<ProcessEntry> {
     };
 
     let mut entries = Vec::new();
-    let mut entry = PROCESSENTRY32W::default();
-    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
 
     if unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok() {
         loop {
@@ -1498,6 +940,7 @@ fn is_macos_claude_candidate(name: &str, command: &str) -> bool {
         || command.contains("/claude-code/")
 }
 
+#[cfg(target_os = "macos")]
 fn command_basename(command: &str) -> String {
     let executable = command.split_whitespace().next().unwrap_or(command);
     executable
@@ -1801,11 +1244,6 @@ fn read_cowork_sticky_model_selector() -> Option<String> {
     read_desktop_local_storage_value(parse_cowork_model_selector_text)
 }
 
-#[cfg(not(target_os = "macos"))]
-fn read_cowork_sticky_model_selector() -> Option<String> {
-    None
-}
-
 #[cfg(target_os = "macos")]
 fn append_desktop_effort(model: Option<String>) -> Option<String> {
     let mut model = model?;
@@ -1813,11 +1251,6 @@ fn append_desktop_effort(model: Option<String>) -> Option<String> {
         append_unique_label(&mut model, true, &effort);
     }
     Some(model)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn append_desktop_effort(model: Option<String>) -> Option<String> {
-    model
 }
 
 #[cfg(target_os = "macos")]
@@ -1864,16 +1297,7 @@ fn read_desktop_local_storage_value(parser: fn(&str) -> Option<String>) -> Optio
     None
 }
 
-#[cfg(not(target_os = "macos"))]
-fn read_desktop_local_storage_value(_parser: fn(&str) -> Option<String>) -> Option<String> {
-    None
-}
-
-#[cfg(not(target_os = "macos"))]
-fn read_sticky_model_selector() -> Option<String> {
-    None
-}
-
+#[cfg(any(target_os = "macos", test))]
 fn parse_sticky_model_selector_text(raw: &str) -> Option<String> {
     let mut model = None;
     for marker in [
@@ -1894,6 +1318,7 @@ fn parse_sticky_model_selector_text(raw: &str) -> Option<String> {
     model
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_cowork_model_selector_text(raw: &str) -> Option<String> {
     let mut model = None;
     for marker in [
@@ -1913,6 +1338,7 @@ fn parse_cowork_model_selector_text(raw: &str) -> Option<String> {
     model
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_desktop_effort_text(raw: &str) -> Option<String> {
     let marker = "ccd-effort-level";
     let mut offset = 0usize;
@@ -1928,6 +1354,7 @@ fn parse_desktop_effort_text(raw: &str) -> Option<String> {
     effort
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn append_desktop_thinking_labels(mut model: String, raw: &str) -> String {
     let lower = raw.to_ascii_lowercase();
     append_unique_label(&mut model, lower.contains("adaptive"), "Adaptive");
@@ -1935,6 +1362,7 @@ fn append_desktop_thinking_labels(mut model: String, raw: &str) -> String {
     model
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn extract_first_model_id(raw: &str) -> Option<String> {
     let (start, needs_prefix) = find_model_token_start(raw)?;
     let tail = &raw[start..];
@@ -1950,6 +1378,7 @@ fn extract_first_model_id(raw: &str) -> Option<String> {
     format_model_name(&id)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn find_model_token_start(raw: &str) -> Option<(usize, bool)> {
     let mut best: Option<(usize, bool)> = None;
     for (needle, needs_prefix) in [
@@ -2032,11 +1461,7 @@ fn read_latest_local_agent_model() -> Option<String> {
     best.map(|(_, model)| model)
 }
 
-#[cfg(not(target_os = "macos"))]
-fn read_latest_local_agent_model() -> Option<String> {
-    None
-}
-
+#[cfg(any(target_os = "macos", test))]
 fn desktop_model_from_local_agent_session(raw: &str) -> Option<String> {
     serde_json::from_str::<Value>(raw)
         .ok()?
@@ -2045,6 +1470,7 @@ fn desktop_model_from_local_agent_session(raw: &str) -> Option<String> {
         .and_then(format_model_name)
 }
 
+#[cfg(target_os = "macos")]
 fn local_agent_session_timestamp(raw: &str) -> Option<u64> {
     let value: Value = serde_json::from_str(raw).ok()?;
     value
@@ -2142,7 +1568,10 @@ fn append_code_effort(model: Option<String>, effort: Option<String>) -> Option<S
 // "ultracode" tier, which leaves effortLevel at "xhigh" (it is xhigh + workflow
 // orchestration) and would otherwise display as "Extra high". Cached per-session
 // so it survives the override scrolling past the tail-read window.
-fn resolve_code_effort(machine: &mut StateMachine, session: Option<&SessionInfo>) -> Option<String> {
+fn resolve_code_effort(
+    machine: &mut StateMachine,
+    session: Option<&SessionInfo>,
+) -> Option<String> {
     let session_file = session.map(|session| session.file.clone());
     if machine.cached_code_effort_session != session_file {
         machine.cached_code_effort = None;
@@ -2295,7 +1724,7 @@ fn desktop_info_from_ui_names(names: &[String], fallback_mode: Option<&str>) -> 
         ("Cowork", cowork_score),
         ("Code", code_score),
     ];
-    ranked.sort_by(|left, right| right.1.cmp(&left.1));
+    ranked.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
 
     let mode = if ranked[0].1 <= 0 {
         fallback_mode.map(str::to_string)
@@ -2447,381 +1876,6 @@ fn extract_effort_label(lower: &str) -> Option<String> {
     }
 }
 
-#[cfg(any(windows, test))]
-fn parse_usage_limits(names: &[String]) -> Vec<UsageLimitEntry> {
-    let mut entries = Vec::new();
-
-    for (index, name) in names.iter().enumerate() {
-        let Some(used_percent) = parse_used_percent(name) else {
-            continue;
-        };
-        let Some((label, label_index)) = find_limit_label(names, index) else {
-            continue;
-        };
-        if entries
-            .iter()
-            .any(|entry: &UsageLimitEntry| entry.label == label)
-        {
-            continue;
-        }
-        entries.push(UsageLimitEntry {
-            label,
-            used_percent,
-            reset: find_limit_reset(names, label_index, index),
-            updated_at_ms: 0,
-        });
-    }
-
-    sort_limit_entries(&mut entries);
-    entries
-}
-
-#[cfg(any(windows, test))]
-fn parse_used_percent(value: &str) -> Option<u8> {
-    let lower = value.to_ascii_lowercase();
-    if !lower.contains("used") || !lower.contains('%') {
-        return None;
-    }
-    let before_percent = lower.split('%').next()?;
-    let digits = before_percent
-        .chars()
-        .rev()
-        .skip_while(|ch| ch.is_whitespace())
-        .take_while(|ch| ch.is_ascii_digit())
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect::<String>();
-    // Parse wide then clamp to 100: an over-limit/glitched scrape (>100, or >255
-    // which would overflow u8 -> None) must not silently drop the row and skew the
-    // "Limits (N)" count — mirror the OAuth path's clamp(0,100).
-    digits.parse::<u32>().ok().map(|value| value.min(100) as u8)
-}
-
-#[cfg(any(windows, test))]
-fn find_limit_label(names: &[String], usage_index: usize) -> Option<(String, usize)> {
-    let start = usage_index.saturating_sub(12);
-    for index in (start..usage_index).rev() {
-        let label = match normalize_ui_label(&names[index]).as_str() {
-            "current session" => "5h",
-            "all models" => "All",
-            "sonnet only" => "Sonnet only",
-            _ => continue,
-        };
-        return Some((label.into(), index));
-    }
-    None
-}
-
-#[cfg(any(windows, test))]
-fn find_limit_reset(names: &[String], label_index: usize, usage_index: usize) -> Option<String> {
-    names
-        .iter()
-        .take(usage_index)
-        .skip(label_index + 1)
-        .find_map(|name| {
-            let normalized = normalize_ui_label(name);
-            normalized
-                .strip_prefix("resets ")
-                .map(|reset| reset.trim().to_string())
-        })
-}
-
-fn limits_line(entries: &[UsageLimitEntry], visibility: LimitVisibility) -> Option<String> {
-    if !visibility.enabled {
-        return None;
-    }
-
-    let parts = visible_limit_labels(visibility)
-        .into_iter()
-        .filter_map(|label| {
-            entries
-                .iter()
-                .find(|entry| entry.label == label)
-                .map(|entry| format!("{} {}%", entry.label, entry.used_percent))
-        })
-        .collect::<Vec<_>>();
-
-    if parts.is_empty() {
-        return None;
-    }
-    let count = parts.len();
-    let parts = parts.join(" | ");
-    Some(truncate(format!("Limits ({count}): {parts}"), 128))
-}
-
-fn visible_limit_labels(visibility: LimitVisibility) -> Vec<&'static str> {
-    let mut labels = Vec::new();
-    if visibility.show_5h {
-        labels.push("5h");
-    }
-    if visibility.show_all {
-        labels.push("All");
-    }
-    if visibility.show_sonnet {
-        labels.push("Sonnet only");
-    }
-    labels
-}
-
-fn current_limits(
-    machine: &mut StateMachine,
-    detected_limits: &[UsageLimitEntry],
-    verbose: bool,
-) -> Vec<UsageLimitEntry> {
-    let now = now_ms();
-    if machine.cached_limits.is_empty() {
-        if let Some(cache) = read_limits_cache(now) {
-            machine.cached_limits = cache.limits;
-        }
-    }
-
-    if !detected_limits.is_empty() {
-        machine.cached_limits = merge_limit_entries(&machine.cached_limits, detected_limits, now);
-        write_limits_cache(now, &machine.cached_limits);
-        return fresh_limit_entries(&machine.cached_limits, now);
-    }
-
-    if let Some(oauth_limits) = maybe_fetch_oauth_limits(machine, now, verbose) {
-        if !oauth_limits.is_empty() {
-            machine.cached_limits = merge_limit_entries(&machine.cached_limits, &oauth_limits, now);
-            write_limits_cache(now, &machine.cached_limits);
-            return fresh_limit_entries(&machine.cached_limits, now);
-        }
-    }
-
-    fresh_limit_entries(&machine.cached_limits, now)
-}
-
-// Drop buckets not refreshed within LIMITS_DISPLAY_TTL_MS so an individual stale
-// percentage (e.g. one OAuth omitted, or all sources down) is never shown as
-// current, while still-fresh siblings keep displaying.
-fn fresh_limit_entries(entries: &[UsageLimitEntry], now: u64) -> Vec<UsageLimitEntry> {
-    entries
-        .iter()
-        .filter(|entry| now.saturating_sub(entry.updated_at_ms) <= LIMITS_DISPLAY_TTL_MS)
-        .cloned()
-        .collect()
-}
-
-const OAUTH_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
-const OAUTH_USAGE_BETA: &str = "oauth-2025-04-20";
-const OAUTH_USAGE_IDLE_POLL_MS: u64 = 10 * 60 * 1000;
-const OAUTH_USAGE_ACTIVITY_POLL_MS: u64 = 60 * 1000;
-const OAUTH_USAGE_BACKOFF_MS: u64 = 5 * 60 * 1000;
-
-fn maybe_fetch_oauth_limits(
-    machine: &mut StateMachine,
-    now: u64,
-    verbose: bool,
-) -> Option<Vec<UsageLimitEntry>> {
-    if now < machine.oauth_backoff_until_ms {
-        machine.pending_activity_refresh = false;
-        return None;
-    }
-    let min_interval = if machine.pending_activity_refresh {
-        OAUTH_USAGE_ACTIVITY_POLL_MS
-    } else {
-        OAUTH_USAGE_IDLE_POLL_MS
-    };
-    if machine.oauth_last_attempt_ms != 0
-        && now.saturating_sub(machine.oauth_last_attempt_ms) < min_interval
-    {
-        return None;
-    }
-    machine.oauth_last_attempt_ms = now;
-    machine.pending_activity_refresh = false;
-    match fetch_oauth_usage(verbose) {
-        Ok(entries) => Some(entries),
-        Err(OAuthFetchError::RateLimited) => {
-            machine.oauth_backoff_until_ms = now + OAUTH_USAGE_BACKOFF_MS;
-            None
-        }
-        Err(_) => None,
-    }
-}
-
-enum OAuthFetchError {
-    NoToken,
-    Network,
-    RateLimited,
-    Parse,
-}
-
-fn fetch_oauth_usage(verbose: bool) -> Result<Vec<UsageLimitEntry>, OAuthFetchError> {
-    let token = read_oauth_access_token().ok_or(OAuthFetchError::NoToken)?;
-    let response = ureq::get(OAUTH_USAGE_URL)
-        .timeout(std::time::Duration::from_secs(8))
-        .set("Authorization", &format!("Bearer {token}"))
-        .set("anthropic-beta", OAUTH_USAGE_BETA)
-        .set("User-Agent", "claude-rpc")
-        .call();
-    let body = match response {
-        Ok(resp) => resp.into_string().map_err(|_| OAuthFetchError::Parse)?,
-        Err(ureq::Error::Status(429, _)) => return Err(OAuthFetchError::RateLimited),
-        Err(_) => return Err(OAuthFetchError::Network),
-    };
-    let value: Value = serde_json::from_str(&body).map_err(|_| OAuthFetchError::Parse)?;
-    if verbose {
-        write_oauth_debug(&value);
-    }
-    Ok(parse_oauth_usage_response(&value))
-}
-
-fn write_oauth_debug(body: &Value) {
-    let path = app_dir().join("oauth-usage-debug.json");
-    write_status(
-        &path,
-        &json!({
-            "fetchedAt": now_ms(),
-            "body": body,
-        }),
-    );
-}
-
-fn read_oauth_access_token() -> Option<String> {
-    let path = claude_dir().join(".credentials.json");
-    let raw = fs::read_to_string(&path).ok()?;
-    let value: Value = serde_json::from_str(raw.trim_start_matches('\u{feff}')).ok()?;
-    let oauth = value.get("claudeAiOauth")?;
-    let token = oauth.get("accessToken").and_then(Value::as_str)?;
-    if let Some(expires_at) = oauth.get("expiresAt").and_then(Value::as_u64) {
-        if expires_at < now_ms() {
-            return None;
-        }
-    }
-    Some(token.to_string())
-}
-
-fn parse_oauth_usage_response(body: &Value) -> Vec<UsageLimitEntry> {
-    let mut entries = Vec::new();
-    let buckets = [
-        ("five_hour", "5h"),
-        ("seven_day", "All"),
-        ("seven_day_sonnet", "Sonnet only"),
-    ];
-    for (key, label) in buckets {
-        let Some(bucket) = body.get(key) else { continue };
-        let Some(percent) = extract_oauth_usage_percent(bucket) else {
-            continue;
-        };
-        let reset = bucket
-            .get("resets_at")
-            .and_then(Value::as_str)
-            .or_else(|| bucket.get("reset_at").and_then(Value::as_str))
-            .map(String::from);
-        entries.push(UsageLimitEntry {
-            label: label.into(),
-            used_percent: percent,
-            reset,
-            updated_at_ms: 0,
-        });
-    }
-    entries
-}
-
-fn extract_oauth_usage_percent(bucket: &Value) -> Option<u8> {
-    // `utilization` is always a 0..100 percentage in the OAuth usage API.
-    if let Some(raw) = bucket.get("utilization").and_then(Value::as_f64) {
-        return Some(raw.round().clamp(0.0, 100.0) as u8);
-    }
-    for key in ["percent_used", "used_percent", "usage", "value"] {
-        let Some(raw) = bucket.get(key).and_then(Value::as_f64) else {
-            continue;
-        };
-        // Auto-detect: ratio (0..1) gets multiplied; percentage (>1.5) used directly
-        let pct = if raw <= 1.5 { raw * 100.0 } else { raw };
-        return Some(pct.round().clamp(0.0, 100.0) as u8);
-    }
-    None
-}
-
-fn write_limits_cache(updated_at: u64, limits: &[UsageLimitEntry]) {
-    let path = app_dir().join("limits-cache.json");
-    write_status(
-        &path,
-        &json!({
-            "updatedAt": updated_at,
-            "limits": limits,
-        }),
-    );
-}
-
-fn read_limits_cache(now: u64) -> Option<LimitsCache> {
-    let raw = fs::read_to_string(app_dir().join("limits-cache.json")).ok()?;
-    let value: Value = serde_json::from_str(raw.trim_start_matches('\u{feff}')).ok()?;
-    let updated_at = value.get("updatedAt").and_then(Value::as_u64)?;
-    if now.saturating_sub(updated_at) > LIMITS_CACHE_MS {
-        return None;
-    }
-    let mut limits =
-        normalize_limit_entries(serde_json::from_value(value.get("limits")?.clone()).ok()?);
-    // Cache files written before per-entry stamps carry updated_at_ms == 0; treat
-    // them as having the file's age so they expire correctly rather than instantly.
-    for entry in &mut limits {
-        if entry.updated_at_ms == 0 {
-            entry.updated_at_ms = updated_at;
-        }
-    }
-    Some(LimitsCache { updated_at, limits })
-}
-
-fn merge_limit_entries(
-    cached: &[UsageLimitEntry],
-    detected: &[UsageLimitEntry],
-    now: u64,
-) -> Vec<UsageLimitEntry> {
-    let mut merged = normalize_limit_entries(cached.to_vec());
-    for mut entry in normalize_limit_entries(detected.to_vec()) {
-        entry.updated_at_ms = now;
-        if let Some(existing) = merged.iter_mut().find(|item| item.label == entry.label) {
-            *existing = entry;
-        } else {
-            merged.push(entry);
-        }
-    }
-    sort_limit_entries(&mut merged);
-    merged
-}
-
-fn normalize_limit_entries(entries: Vec<UsageLimitEntry>) -> Vec<UsageLimitEntry> {
-    let mut normalized = Vec::new();
-    for mut entry in entries {
-        let Some(label) = normalize_limit_label(&entry.label) else {
-            continue;
-        };
-        entry.label = label.into();
-        if let Some(existing) = normalized
-            .iter_mut()
-            .find(|item: &&mut UsageLimitEntry| item.label == entry.label)
-        {
-            *existing = entry;
-        } else {
-            normalized.push(entry);
-        }
-    }
-    sort_limit_entries(&mut normalized);
-    normalized
-}
-
-fn normalize_limit_label(label: &str) -> Option<&'static str> {
-    match normalize_ui_label(label).as_str() {
-        "5h" | "session" | "current session" => Some("5h"),
-        "all" | "all models" => Some("All"),
-        "sonnet" | "sonnet only" | "max only" => Some("Sonnet only"),
-        _ => None,
-    }
-}
-
-fn sort_limit_entries(entries: &mut Vec<UsageLimitEntry>) {
-    entries.sort_by_key(|entry| match entry.label.as_str() {
-        "5h" => 0,
-        "All" => 1,
-        "Sonnet only" => 2,
-        _ => 9,
-    });
-}
-
 #[cfg(windows)]
 fn write_ui_debug(names: &[String], info: &DesktopInfo) -> Option<String> {
     let path = app_dir().join("ui-debug.json");
@@ -2967,7 +2021,7 @@ fn read_session_title(path: &Path) -> Option<String> {
 
 fn find_latest_jsonl_file(root: &Path, max_age_ms: u64) -> Option<PathBuf> {
     let mut candidates = collect_jsonl_candidates(root, max_age_ms);
-    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    candidates.sort_by_key(|(_, mtime)| std::cmp::Reverse(*mtime));
     candidates
         .into_iter()
         .find(|(path, _)| is_user_session_file(path))
@@ -2975,13 +2029,7 @@ fn find_latest_jsonl_file(root: &Path, max_age_ms: u64) -> Option<PathBuf> {
 }
 
 fn collect_jsonl_candidates(root: &Path, max_age_ms: u64) -> Vec<(PathBuf, u64)> {
-    fn walk(
-        dir: &Path,
-        depth: usize,
-        now: u64,
-        max_age_ms: u64,
-        out: &mut Vec<(PathBuf, u64)>,
-    ) {
+    fn walk(dir: &Path, depth: usize, now: u64, max_age_ms: u64, out: &mut Vec<(PathBuf, u64)>) {
         if depth > 3 {
             return;
         }
@@ -3047,7 +2095,7 @@ fn read_session_cwd(path: &Path) -> Option<String> {
 fn is_user_project_cwd(cwd: &str) -> bool {
     // Reject sessions whose cwd lives inside a hidden directory (e.g. C:\Users\x\.claude-mem\...)
     // Background subagents/observers run from these; real Claude Code sessions don't.
-    cwd.split(|c| c == '/' || c == '\\')
+    cwd.split(['/', '\\'])
         .filter(|seg| !seg.is_empty())
         .all(|seg| !seg.starts_with('.') || seg.chars().all(|c| c == '.'))
 }
@@ -3075,10 +2123,7 @@ fn read_session_start_ms(path: &Path) -> Option<u64> {
 }
 
 fn read_session_tail(path: &Path) -> Option<String> {
-    let lines = match read_tail_lines(path, 256 * 1024) {
-        Some(lines) => lines,
-        None => return None,
-    };
+    let lines = read_tail_lines(path, 256 * 1024)?;
     // Pass 1: latest "/model" command anywhere — user-set model wins
     for line in lines.iter().rev() {
         let Ok(entry) = serde_json::from_str::<Value>(line) else {
@@ -3186,8 +2231,7 @@ fn detect_project_name(session_file: &Path) -> Option<String> {
         .collect::<Vec<_>>();
     parts
         .last()
-        .map(|value| sanitize_field(Some(value), 64))
-        .flatten()
+        .and_then(|value| sanitize_field(Some(value), 64))
 }
 
 fn read_tail_lines(path: &Path, max_bytes: u64) -> Option<Vec<String>> {
@@ -3208,280 +2252,6 @@ fn read_tail_lines(path: &Path, max_bytes: u64) -> Option<Vec<String>> {
         lines.remove(0);
     }
     Some(lines)
-}
-
-struct DiscordIpc {
-    connection: IpcConnection,
-    username: Option<String>,
-    nonce: u64,
-}
-
-enum IpcConnection {
-    #[cfg(windows)]
-    File(File),
-    #[cfg(unix)]
-    Unix(UnixStream),
-}
-
-impl Read for IpcConnection {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match self {
-            #[cfg(windows)]
-            Self::File(file) => file.read(buf),
-            #[cfg(unix)]
-            Self::Unix(stream) => stream.read(buf),
-        }
-    }
-}
-
-impl Write for IpcConnection {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        match self {
-            #[cfg(windows)]
-            Self::File(file) => file.write(buf),
-            #[cfg(unix)]
-            Self::Unix(stream) => stream.write(buf),
-        }
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        match self {
-            #[cfg(windows)]
-            Self::File(file) => file.flush(),
-            #[cfg(unix)]
-            Self::Unix(stream) => stream.flush(),
-        }
-    }
-}
-
-impl IpcConnection {
-    /// Block until at least `needed` bytes can be read without the following
-    /// `read_exact` blocking, or fail after `IPC_READ_TIMEOUT_MS`. This bounds the
-    /// single daemon thread (and Quit's `handle.join`) so a wedged Discord that
-    /// accepts the SET_ACTIVITY write but never answers can no longer hang it
-    /// forever — a timeout/closed-pipe surfaces as `Err`, and the run loop drops
-    /// the connection and reconnects on the next tick. On Unix the stream's own
-    /// read timeout already enforces this, so it is a no-op there.
-    fn await_readable(&self, needed: usize) -> std::io::Result<()> {
-        match self {
-            #[cfg(windows)]
-            Self::File(file) => wait_pipe_readable(file, needed),
-            #[cfg(unix)]
-            Self::Unix(_) => {
-                let _ = needed;
-                Ok(())
-            }
-        }
-    }
-}
-
-// Windows named pipes opened as a plain blocking `File` cannot use
-// `set_read_timeout`. Poll `PeekNamedPipe` (non-destructive) until enough bytes
-// are buffered that the subsequent `read_exact` returns immediately, bailing out
-// on a closed pipe or after the timeout budget.
-#[cfg(windows)]
-fn wait_pipe_readable(file: &File, needed: usize) -> std::io::Result<()> {
-    use std::os::windows::io::AsRawHandle;
-    if needed == 0 {
-        return Ok(());
-    }
-    let handle = HANDLE(file.as_raw_handle());
-    let deadline = now_ms().saturating_add(IPC_READ_TIMEOUT_MS);
-    loop {
-        let mut available: u32 = 0;
-        unsafe { PeekNamedPipe(handle, None, 0, None, Some(&mut available), None) }.map_err(
-            |_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "discord ipc pipe closed"),
-        )?;
-        if available as usize >= needed {
-            return Ok(());
-        }
-        if now_ms() >= deadline {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "discord ipc read timed out",
-            ));
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-}
-
-impl DiscordIpc {
-    fn connect(client_id: &str) -> std::io::Result<Self> {
-        let mut client = Self {
-            connection: connect_discord_ipc()?,
-            username: None,
-            nonce: 0,
-        };
-        client.send_frame(0, &json!({ "v": 1, "client_id": client_id }))?;
-        let ready = client.read_frame()?;
-        client.username = ready
-            .get("data")
-            .and_then(|data| data.get("user"))
-            .and_then(|user| user.get("username"))
-            .and_then(Value::as_str)
-            .map(|value| sanitize_discord_user(value).unwrap_or_else(|| value.to_string()));
-        Ok(client)
-    }
-
-    fn set_activity(&mut self, activity: Value) -> std::io::Result<()> {
-        let nonce = self.next_nonce();
-        self.send_frame(
-            1,
-            &json!({
-                "cmd": "SET_ACTIVITY",
-                "args": { "pid": std::process::id(), "activity": activity },
-                "nonce": nonce,
-            }),
-        )?;
-        self.read_response(&nonce)
-    }
-
-    fn clear_activity(&mut self) -> std::io::Result<()> {
-        let nonce = self.next_nonce();
-        self.send_frame(
-            1,
-            &json!({
-                "cmd": "SET_ACTIVITY",
-                "args": { "pid": std::process::id() },
-                "nonce": nonce,
-            }),
-        )?;
-        self.read_response(&nonce)
-    }
-
-    fn read_response(&mut self, nonce: &str) -> std::io::Result<()> {
-        for _ in 0..4 {
-            let frame = self.read_frame()?;
-            if frame.get("nonce").and_then(Value::as_str) == Some(nonce) {
-                if frame.get("evt").and_then(Value::as_str) == Some("ERROR") {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "discord rpc error",
-                    ));
-                }
-                return Ok(());
-            }
-        }
-        // No frame carried our nonce within the budget: treat the push as
-        // unconfirmed rather than silently successful, so the run loop drops the
-        // connection and reconnects instead of caching a presence that may never
-        // have landed. With no event subscriptions the response is normally the
-        // very first frame, so this only fires on a genuinely wedged/desynced peer.
-        Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "discord rpc: no matching response",
-        ))
-    }
-
-    fn next_nonce(&mut self) -> String {
-        self.nonce += 1;
-        format!("claude-rpc-{}-{}", std::process::id(), self.nonce)
-    }
-
-    fn send_frame(&mut self, opcode: u32, payload: &Value) -> std::io::Result<()> {
-        let data = serde_json::to_vec(payload)?;
-        self.connection.write_all(&opcode.to_le_bytes())?;
-        self.connection
-            .write_all(&(data.len() as u32).to_le_bytes())?;
-        self.connection.write_all(&data)?;
-        self.connection.flush()
-    }
-
-    fn read_frame(&mut self) -> std::io::Result<Value> {
-        // Bound the loop: a peer that only ever sends PING (opcode 3) must not
-        // be able to keep this thread spinning forever.
-        for _ in 0..16 {
-            let mut header = [0u8; 8];
-            self.connection.await_readable(header.len())?;
-            self.connection.read_exact(&mut header)?;
-            let opcode = u32::from_le_bytes(header[0..4].try_into().unwrap());
-            let len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
-            if len > 1024 * 1024 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "discord ipc frame too large",
-                ));
-            }
-            let mut payload = vec![0u8; len];
-            self.connection.await_readable(len)?;
-            self.connection.read_exact(&mut payload)?;
-            let value: Value = serde_json::from_slice(&payload)?;
-            match opcode {
-                1 => return Ok(value),
-                2 => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::ConnectionAborted,
-                        "discord closed ipc",
-                    ));
-                }
-                3 => {
-                    let _ = self.send_frame(4, &value);
-                }
-                4 => {}
-                _ => {}
-            }
-        }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "discord ipc: too many control frames",
-        ))
-    }
-}
-
-#[cfg(windows)]
-fn connect_discord_ipc() -> std::io::Result<IpcConnection> {
-    for id in 0..10 {
-        let path = format!(r"\\?\pipe\discord-ipc-{id}");
-        if let Ok(candidate) = OpenOptions::new().read(true).write(true).open(path) {
-            return Ok(IpcConnection::File(candidate));
-        }
-    }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::NotFound,
-        "discord ipc",
-    ))
-}
-
-#[cfg(unix)]
-fn connect_discord_ipc() -> std::io::Result<IpcConnection> {
-    for base in discord_ipc_roots() {
-        for id in 0..10 {
-            let path = base.join(format!("discord-ipc-{id}"));
-            if let Ok(stream) = UnixStream::connect(path) {
-                // Bound blocking reads/writes so a wedged Discord can't hang the
-                // single daemon thread (and Quit's handle.join) forever; a timeout
-                // surfaces as Err and the run loop reconnects on the next tick.
-                let _ = stream.set_read_timeout(Some(Duration::from_millis(IPC_READ_TIMEOUT_MS)));
-                let _ = stream.set_write_timeout(Some(Duration::from_millis(IPC_READ_TIMEOUT_MS)));
-                return Ok(IpcConnection::Unix(stream));
-            }
-        }
-    }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::NotFound,
-        "discord ipc",
-    ))
-}
-
-#[cfg(unix)]
-fn discord_ipc_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    for name in ["XDG_RUNTIME_DIR", "TMPDIR", "TMP", "TEMP"] {
-        if let Some(path) = std::env::var_os(name).map(PathBuf::from) {
-            push_unique_path(&mut roots, path);
-        }
-    }
-    for path in ["/tmp", "/var/tmp", "/usr/tmp"] {
-        push_unique_path(&mut roots, PathBuf::from(path));
-    }
-    roots
-}
-
-#[cfg(unix)]
-fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
-    if !paths.iter().any(|existing| existing == &path) {
-        paths.push(path);
-    }
 }
 
 fn write_status(path: &Path, value: &Value) {
@@ -3586,40 +2356,6 @@ fn map_desktop_mode(value: &str) -> Option<String> {
         "chat" => Some("Chat".into()),
         "code" => Some("Code".into()),
         _ => None,
-    }
-}
-
-fn normalize_mode(value: &str) -> String {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "watching" | "tv" => "watching",
-        "listening" | "listen" => "listening",
-        "competing" | "compete" => "competing",
-        _ => "playing",
-    }
-    .into()
-}
-
-fn clean_label(value: &str) -> Option<String> {
-    let cleaned = value
-        .chars()
-        .filter(|ch| !ch.is_control())
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if cleaned.is_empty() {
-        None
-    } else {
-        Some(cleaned.chars().take(32).collect())
-    }
-}
-
-fn clean_url(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.starts_with("http://") || value.starts_with("https://") {
-        Some(value.to_string())
-    } else {
-        None
     }
 }
 
@@ -3795,9 +2531,18 @@ mod tests {
 
     #[test]
     fn prices_models_by_id() {
-        assert_eq!(model_pricing("claude-opus-4-8[1m]"), Some(("Opus", 5.0, 25.0)));
-        assert_eq!(model_pricing("claude-opus-4-1-20250805"), Some(("Opus", 15.0, 75.0)));
-        assert_eq!(model_pricing("claude-sonnet-4-6"), Some(("Sonnet", 3.0, 15.0)));
+        assert_eq!(
+            model_pricing("claude-opus-4-8[1m]"),
+            Some(("Opus", 5.0, 25.0))
+        );
+        assert_eq!(
+            model_pricing("claude-opus-4-1-20250805"),
+            Some(("Opus", 15.0, 75.0))
+        );
+        assert_eq!(
+            model_pricing("claude-sonnet-4-6"),
+            Some(("Sonnet", 3.0, 15.0))
+        );
         assert_eq!(
             model_pricing("claude-haiku-4-5-20251001"),
             Some(("Haiku", 1.0, 5.0))
@@ -3824,7 +2569,11 @@ mod tests {
         assert_eq!(opus.output_tokens, 1_000_000);
         // input $5 + output $25 + cacheRead 1M*0.1*5=$0.5 + write5m 1M*1.25*5=$6.25
         //   + write1h 2M*2*5=$20  => $56.75
-        assert!((opus.cost_usd - 56.75).abs() < 1e-6, "cost_usd was {}", opus.cost_usd);
+        assert!(
+            (opus.cost_usd - 56.75).abs() < 1e-6,
+            "cost_usd was {}",
+            opus.cost_usd
+        );
         assert!((opus.input_cost - 5.0).abs() < 1e-6);
         assert!((opus.output_cost - 25.0).abs() < 1e-6);
     }
@@ -4170,7 +2919,11 @@ mod tests {
         let limits = merge_limit_entries(&cached, &detected, 2_000);
         assert!(limits.iter().all(|entry| entry.updated_at_ms != 0));
         assert_eq!(
-            limits.iter().find(|entry| entry.label == "5h").unwrap().updated_at_ms,
+            limits
+                .iter()
+                .find(|entry| entry.label == "5h")
+                .unwrap()
+                .updated_at_ms,
             2_000
         );
         assert_eq!(

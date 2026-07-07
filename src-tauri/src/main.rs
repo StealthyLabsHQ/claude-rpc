@@ -1,8 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod config;
 mod daemon;
 
-use serde::{Deserialize, Serialize};
+use config::ClaudeConfig;
+use serde::Serialize;
 use serde_json::Value;
 use std::{
     fs,
@@ -58,73 +60,6 @@ const STARTUP_REG_VALUE: &str = "Claude RPC";
 #[cfg(target_os = "macos")]
 const MACOS_LAUNCH_AGENT_LABEL: &str = "eu.stealthylabs.claude-rpc";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RpcButton {
-    label: String,
-    url: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeConfig {
-    #[serde(default)]
-    dnd: bool,
-    #[serde(default = "default_show_limits")]
-    show_limits: bool,
-    #[serde(default = "default_show_limits")]
-    show_limit_5h: bool,
-    #[serde(default = "default_show_limits")]
-    show_limit_all: bool,
-    #[serde(default = "default_show_limits")]
-    show_limit_sonnet: bool,
-    #[serde(default = "default_show_limits")]
-    show_provider: bool,
-    #[serde(default = "default_show_limits")]
-    show_effort: bool,
-    #[serde(default = "default_show_limits")]
-    show_session_title: bool,
-    #[serde(default)]
-    show_cost: bool,
-    #[serde(default)]
-    show_cost_total: bool,
-    #[serde(default)]
-    show_project_tokens: bool,
-    #[serde(default)]
-    show_all_tokens: bool,
-    #[serde(default)]
-    show_idle: bool,
-    #[serde(default)]
-    verbose: bool,
-    #[serde(default = "default_rpc_mode")]
-    rpc_mode: String,
-    #[serde(default = "default_buttons")]
-    buttons: Vec<RpcButton>,
-}
-
-impl Default for ClaudeConfig {
-    fn default() -> Self {
-        Self {
-            dnd: false,
-            show_limits: default_show_limits(),
-            show_limit_5h: default_show_limits(),
-            show_limit_all: default_show_limits(),
-            show_limit_sonnet: default_show_limits(),
-            show_provider: default_show_limits(),
-            show_effort: default_show_limits(),
-            show_session_title: default_show_limits(),
-            show_cost: false,
-            show_cost_total: false,
-            show_project_tokens: false,
-            show_all_tokens: false,
-            show_idle: false,
-            verbose: false,
-            rpc_mode: default_rpc_mode(),
-            buttons: default_buttons(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ClaudeStatus {
@@ -162,27 +97,6 @@ struct DaemonStatus {
     error: Option<String>,
 }
 
-fn default_show_limits() -> bool {
-    true
-}
-
-fn default_rpc_mode() -> String {
-    "playing".into()
-}
-
-fn default_buttons() -> Vec<RpcButton> {
-    vec![
-        RpcButton {
-            label: "Claude".into(),
-            url: "https://claude.ai".into(),
-        },
-        RpcButton {
-            label: "GitHub Repo".into(),
-            url: "https://github.com/stealthsrc/claude-rpc".into(),
-        },
-    ]
-}
-
 #[tauri::command]
 fn load_config() -> Result<ClaudeConfig, String> {
     read_config()
@@ -190,7 +104,7 @@ fn load_config() -> Result<ClaudeConfig, String> {
 
 #[tauri::command]
 fn save_config(app: tauri::AppHandle, config: ClaudeConfig) -> Result<(), String> {
-    let config = normalize_config(config);
+    let config = config::normalize_config(config);
     write_config(&config)?;
     sync_tray_menu(&app, &config);
     Ok(())
@@ -375,8 +289,7 @@ async fn download_and_install(app: &tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn check_update(app: tauri::AppHandle) -> Result<Option<UpdateInfo>, String> {
     let info = fetch_update(&app).await?;
-    *app
-        .state::<UpdateState>()
+    *app.state::<UpdateState>()
         .available
         .lock()
         .expect("update state mutex poisoned") = info.clone();
@@ -438,8 +351,7 @@ fn spawn_update_check(app: tauri::AppHandle) {
         let Ok(Some(info)) = fetch_update(&app).await else {
             return;
         };
-        *app
-            .state::<UpdateState>()
+        *app.state::<UpdateState>()
             .available
             .lock()
             .expect("update state mutex poisoned") = Some(info.clone());
@@ -504,8 +416,7 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let separator_2 = PredefinedMenuItem::separator(app)?;
     let separator_3 = PredefinedMenuItem::separator(app)?;
     let separator_4 = PredefinedMenuItem::separator(app)?;
-    let update_item =
-        MenuItem::with_id(app, "update", "Check for Updates", true, None::<&str>)?;
+    let update_item = MenuItem::with_id(app, "update", "Check for Updates", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
@@ -548,10 +459,7 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .mode_competing
         .lock()
         .expect("tray menu mutex poisoned") = Some(mode_competing_item.clone());
-    *tray_state
-        .update
-        .lock()
-        .expect("tray menu mutex poisoned") = Some(update_item.clone());
+    *tray_state.update.lock().expect("tray menu mutex poisoned") = Some(update_item.clone());
 
     TrayIconBuilder::new()
         .tooltip("Claude RPC")
@@ -614,17 +522,14 @@ fn show_settings(app: &tauri::AppHandle) {
         let _ = window.set_focus();
         return;
     }
-    if let Ok(window) = tauri::WebviewWindowBuilder::new(
-        app,
-        "main",
-        tauri::WebviewUrl::App("index.html".into()),
-    )
-    .title("Claude RPC Settings")
-    .inner_size(790.0, 640.0)
-    .min_inner_size(680.0, 480.0)
-    .resizable(true)
-    .decorations(false)
-    .build()
+    if let Ok(window) =
+        tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
+            .title("Claude RPC Settings")
+            .inner_size(790.0, 640.0)
+            .min_inner_size(680.0, 480.0)
+            .resizable(true)
+            .decorations(false)
+            .build()
     {
         let window_to_hide = window.clone();
         window.on_window_event(move |event| {
@@ -897,14 +802,14 @@ where
 {
     let mut config = read_config()?;
     mutator(&mut config);
-    let config = normalize_config(config);
+    let config = config::normalize_config(config);
     write_config(&config)?;
     Ok(config)
 }
 
 fn read_config() -> Result<ClaudeConfig, String> {
     match fs::read_to_string(config_path()?) {
-        Ok(raw) => Ok(normalize_config(
+        Ok(raw) => Ok(config::normalize_config(
             serde_json::from_str::<ClaudeConfig>(raw.trim_start_matches('\u{feff}'))
                 .unwrap_or_default(),
         )),
@@ -920,41 +825,6 @@ fn write_config(config: &ClaudeConfig) -> Result<(), String> {
     }
     let json = serde_json::to_string_pretty(config).map_err(|err| err.to_string())?;
     fs::write(path, json).map_err(|err| err.to_string())
-}
-
-fn normalize_config(mut config: ClaudeConfig) -> ClaudeConfig {
-    config.rpc_mode = match config.rpc_mode.trim().to_ascii_lowercase().as_str() {
-        "watching" | "tv" => "watching".into(),
-        "listening" => "listening".into(),
-        "competing" => "competing".into(),
-        _ => "playing".into(),
-    };
-    config.buttons = config
-        .buttons
-        .into_iter()
-        .filter_map(clean_button)
-        .take(2)
-        .collect();
-    config
-}
-
-fn clean_button(button: RpcButton) -> Option<RpcButton> {
-    let label = button
-        .label
-        .chars()
-        .filter(|ch| !ch.is_control())
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let url = button.url.trim().to_string();
-    if label.is_empty() || !(url.starts_with("http://") || url.starts_with("https://")) {
-        return None;
-    }
-    Some(RpcButton {
-        label: label.chars().take(32).collect(),
-        url,
-    })
 }
 
 fn config_path() -> Result<PathBuf, String> {
