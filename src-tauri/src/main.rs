@@ -15,7 +15,6 @@ use std::{
     },
 };
 use tauri::{
-    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, WindowEvent,
 };
@@ -31,17 +30,6 @@ struct DaemonState {
 }
 
 #[derive(Default)]
-struct TrayMenuState {
-    dnd: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
-    start_on_windows: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
-    mode_playing: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
-    mode_watching: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
-    mode_listening: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
-    mode_competing: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
-    update: Mutex<Option<MenuItem<tauri::Wry>>>,
-}
-
-#[derive(Default)]
 struct UpdateState {
     available: Mutex<Option<UpdateInfo>>,
 }
@@ -51,6 +39,17 @@ struct UpdateState {
 struct UpdateInfo {
     version: String,
     notes: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrayInfo {
+    dnd: bool,
+    start_on_windows: bool,
+    startup_label: String,
+    rpc_mode: String,
+    update_version: Option<String>,
+    app_version: String,
 }
 
 #[cfg(windows)]
@@ -103,10 +102,9 @@ fn load_config() -> Result<ClaudeConfig, String> {
 }
 
 #[tauri::command]
-fn save_config(app: tauri::AppHandle, config: ClaudeConfig) -> Result<(), String> {
+fn save_config(config: ClaudeConfig) -> Result<(), String> {
     let config = config::normalize_config(config);
     write_config(&config)?;
-    sync_tray_menu(&app, &config);
     Ok(())
 }
 
@@ -310,6 +308,85 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
     download_and_install(&app).await
 }
 
+fn read_tray_info(app: &tauri::AppHandle) -> TrayInfo {
+    let config = read_config().unwrap_or_default();
+    let update_version = app
+        .state::<UpdateState>()
+        .available
+        .lock()
+        .expect("update state mutex poisoned")
+        .as_ref()
+        .map(|info| info.version.clone());
+    TrayInfo {
+        dnd: config.dnd,
+        start_on_windows: is_start_on_windows_enabled(),
+        startup_label: startup_menu_label().to_string(),
+        rpc_mode: config.rpc_mode,
+        update_version,
+        app_version: app.package_info().version.to_string(),
+    }
+}
+
+#[tauri::command]
+fn tray_state(app: tauri::AppHandle) -> TrayInfo {
+    read_tray_info(&app)
+}
+
+#[tauri::command]
+async fn tray_action(app: tauri::AppHandle, action: String) -> Result<TrayInfo, String> {
+    let hide_tray = || {
+        if let Some(window) = app.get_webview_window("tray") {
+            let _ = window.hide();
+        }
+    };
+    match action.as_str() {
+        "close" => hide_tray(),
+        "settings" => {
+            hide_tray();
+            show_settings(&app);
+        }
+        "dnd" => {
+            update_config(|config| config.dnd = !config.dnd)?;
+        }
+        "startup" => {
+            set_start_on_windows(!is_start_on_windows_enabled())?;
+        }
+        "mode_playing" => set_mode("playing")?,
+        "mode_watching" => set_mode("watching")?,
+        "mode_listening" => set_mode("listening")?,
+        "mode_competing" => set_mode("competing")?,
+        "update" => {
+            let pending = app
+                .state::<UpdateState>()
+                .available
+                .lock()
+                .expect("update state mutex poisoned")
+                .is_some();
+            if pending {
+                hide_tray();
+                let handle = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = download_and_install(&handle).await;
+                });
+            } else {
+                let info = fetch_update(&app).await?;
+                *app.state::<UpdateState>()
+                    .available
+                    .lock()
+                    .expect("update state mutex poisoned") = info;
+            }
+        }
+        "quit" => {
+            hide_tray();
+            let state = app.state::<DaemonState>();
+            stop_daemon(&state);
+            app.exit(0);
+        }
+        other => return Err(format!("unknown tray action: {other}")),
+    }
+    Ok(read_tray_info(&app))
+}
+
 fn main() {
     tauri::Builder::default()
         // Must be the first plugin: a second launch (autostart + manual, double
@@ -320,7 +397,6 @@ fn main() {
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(DaemonState::default())
-        .manage(TrayMenuState::default())
         .manage(UpdateState::default())
         .invoke_handler(tauri::generate_handler![
             load_config,
@@ -332,7 +408,9 @@ fn main() {
             refresh_limits,
             check_update,
             pending_update,
-            install_update
+            install_update,
+            tray_state,
+            tray_action
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -354,154 +432,27 @@ fn spawn_update_check(app: tauri::AppHandle) {
         *app.state::<UpdateState>()
             .available
             .lock()
-            .expect("update state mutex poisoned") = Some(info.clone());
-        let item = app
-            .state::<TrayMenuState>()
-            .update
-            .lock()
-            .expect("tray menu mutex poisoned")
-            .clone();
-        if let Some(item) = item {
-            let _ = item.set_text(format!("Install Update v{}", info.version));
-        }
+            .expect("update state mutex poisoned") = Some(info);
     });
 }
 
 fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
-    let config = read_config().unwrap_or_default();
-    let show_item = MenuItem::with_id(app, "show", "Settings", true, None::<&str>)?;
-    let dnd_item =
-        CheckMenuItem::with_id(app, "dnd", "Do Not Disturb", true, config.dnd, None::<&str>)?;
-    let start_on_windows_item = CheckMenuItem::with_id(
-        app,
-        "start_on_windows",
-        startup_menu_label(),
-        true,
-        is_start_on_windows_enabled(),
-        None::<&str>,
-    )?;
-    let mode_playing_item = CheckMenuItem::with_id(
-        app,
-        "mode_playing",
-        "Mode: Playing",
-        true,
-        config.rpc_mode == "playing",
-        None::<&str>,
-    )?;
-    let mode_watching_item = CheckMenuItem::with_id(
-        app,
-        "mode_watching",
-        "Mode: Watching",
-        true,
-        config.rpc_mode == "watching",
-        None::<&str>,
-    )?;
-    let mode_listening_item = CheckMenuItem::with_id(
-        app,
-        "mode_listening",
-        "Mode: Listening",
-        true,
-        config.rpc_mode == "listening",
-        None::<&str>,
-    )?;
-    let mode_competing_item = CheckMenuItem::with_id(
-        app,
-        "mode_competing",
-        "Mode: Competing",
-        true,
-        config.rpc_mode == "competing",
-        None::<&str>,
-    )?;
-    let separator_1 = PredefinedMenuItem::separator(app)?;
-    let separator_2 = PredefinedMenuItem::separator(app)?;
-    let separator_3 = PredefinedMenuItem::separator(app)?;
-    let separator_4 = PredefinedMenuItem::separator(app)?;
-    let update_item = MenuItem::with_id(app, "update", "Check for Updates", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(
-        app,
-        &[
-            &show_item,
-            &separator_1,
-            &dnd_item,
-            &start_on_windows_item,
-            &separator_2,
-            &mode_playing_item,
-            &mode_watching_item,
-            &mode_listening_item,
-            &mode_competing_item,
-            &separator_3,
-            &update_item,
-            &separator_4,
-            &quit_item,
-        ],
-    )?;
-
-    let tray_state = app.state::<TrayMenuState>();
-    *tray_state.dnd.lock().expect("tray menu mutex poisoned") = Some(dnd_item.clone());
-    *tray_state
-        .start_on_windows
-        .lock()
-        .expect("tray menu mutex poisoned") = Some(start_on_windows_item.clone());
-    *tray_state
-        .mode_playing
-        .lock()
-        .expect("tray menu mutex poisoned") = Some(mode_playing_item.clone());
-    *tray_state
-        .mode_watching
-        .lock()
-        .expect("tray menu mutex poisoned") = Some(mode_watching_item.clone());
-    *tray_state
-        .mode_listening
-        .lock()
-        .expect("tray menu mutex poisoned") = Some(mode_listening_item.clone());
-    *tray_state
-        .mode_competing
-        .lock()
-        .expect("tray menu mutex poisoned") = Some(mode_competing_item.clone());
-    *tray_state.update.lock().expect("tray menu mutex poisoned") = Some(update_item.clone());
-
     TrayIconBuilder::new()
         .tooltip("Claude RPC")
         .icon(app.default_window_icon().unwrap().clone())
-        .menu(&menu)
-        .show_menu_on_left_click(false)
-        .on_menu_event(move |app, event| match event.id.as_ref() {
-            "show" => show_settings(app),
-            "dnd" => {
-                if let Ok(config) = update_config(|config| config.dnd = !config.dnd) {
-                    sync_tray_menu(app, &config);
-                }
-            }
-            "start_on_windows" => {
-                let _ = set_start_on_windows(!is_start_on_windows_enabled());
-                sync_start_on_windows_menu(app);
-            }
-            "mode_playing" => set_mode(app, "playing"),
-            "mode_watching" => set_mode(app, "watching"),
-            "mode_listening" => set_mode(app, "listening"),
-            "mode_competing" => set_mode(app, "competing"),
-            "update" => {
-                let handle = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    let _ = download_and_install(&handle).await;
-                });
-            }
-            "quit" => {
-                let state = app.state::<DaemonState>();
-                stop_daemon(&state);
-                app.exit(0);
-            }
-            _ => {}
-        })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
-                button: MouseButton::Left,
+                button,
                 button_state: MouseButtonState::Up,
+                position,
                 ..
             } = event
             {
-                show_settings(tray.app_handle());
+                match button {
+                    MouseButton::Left => show_settings(tray.app_handle()),
+                    MouseButton::Right => show_tray_menu(tray.app_handle(), position),
+                    MouseButton::Middle => {}
+                }
             }
         })
         .build(app)?;
@@ -509,10 +460,55 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-fn set_mode(app: &tauri::AppHandle, mode: &str) {
-    if let Ok(config) = update_config(|config| config.rpc_mode = mode.into()) {
-        sync_tray_menu(app, &config);
-    }
+// Logical size of the custom tray menu window; tray.css lays the menu out with
+// fixed item heights so the content always fits this box, bottom-anchored.
+const TRAY_MENU_WIDTH: f64 = 260.0;
+const TRAY_MENU_HEIGHT: f64 = 416.0;
+
+fn show_tray_menu(app: &tauri::AppHandle, cursor: tauri::PhysicalPosition<f64>) {
+    let window = match app.get_webview_window("tray") {
+        Some(window) => window,
+        None => {
+            let Ok(window) = tauri::WebviewWindowBuilder::new(
+                app,
+                "tray",
+                tauri::WebviewUrl::App("tray.html".into()),
+            )
+            .inner_size(TRAY_MENU_WIDTH, TRAY_MENU_HEIGHT)
+            .resizable(false)
+            .maximizable(false)
+            .minimizable(false)
+            .decorations(false)
+            .transparent(true)
+            .shadow(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .visible(false)
+            .build() else {
+                return;
+            };
+            let window_to_hide = window.clone();
+            window.on_window_event(move |event| {
+                if let WindowEvent::Focused(false) = event {
+                    let _ = window_to_hide.hide();
+                }
+            });
+            window
+        }
+    };
+
+    let size = window
+        .outer_size()
+        .unwrap_or(tauri::PhysicalSize::new(0, 0));
+    let x = (cursor.x - f64::from(size.width)).max(0.0);
+    let y = (cursor.y - f64::from(size.height)).max(0.0);
+    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+fn set_mode(mode: &str) -> Result<(), String> {
+    update_config(|config| config.rpc_mode = mode.into()).map(|_| ())
 }
 
 fn show_settings(app: &tauri::AppHandle) {
@@ -539,58 +535,6 @@ fn show_settings(app: &tauri::AppHandle) {
             }
         });
     }
-}
-
-fn sync_tray_menu(app: &tauri::AppHandle, config: &ClaudeConfig) {
-    let state = app.state::<TrayMenuState>();
-    if let Some(item) = state.dnd.lock().expect("tray menu mutex poisoned").clone() {
-        let _ = item.set_checked(config.dnd);
-    }
-    sync_start_on_windows_menu(app);
-    if let Some(item) = state
-        .mode_playing
-        .lock()
-        .expect("tray menu mutex poisoned")
-        .clone()
-    {
-        let _ = item.set_checked(config.rpc_mode == "playing");
-    }
-    if let Some(item) = state
-        .mode_watching
-        .lock()
-        .expect("tray menu mutex poisoned")
-        .clone()
-    {
-        let _ = item.set_checked(config.rpc_mode == "watching");
-    }
-    if let Some(item) = state
-        .mode_listening
-        .lock()
-        .expect("tray menu mutex poisoned")
-        .clone()
-    {
-        let _ = item.set_checked(config.rpc_mode == "listening");
-    }
-    if let Some(item) = state
-        .mode_competing
-        .lock()
-        .expect("tray menu mutex poisoned")
-        .clone()
-    {
-        let _ = item.set_checked(config.rpc_mode == "competing");
-    };
-}
-
-fn sync_start_on_windows_menu(app: &tauri::AppHandle) {
-    let state = app.state::<TrayMenuState>();
-    if let Some(item) = state
-        .start_on_windows
-        .lock()
-        .expect("tray menu mutex poisoned")
-        .clone()
-    {
-        let _ = item.set_checked(is_start_on_windows_enabled());
-    };
 }
 
 #[cfg(windows)]
