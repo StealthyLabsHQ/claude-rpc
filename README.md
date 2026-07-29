@@ -2,7 +2,7 @@
 
 # Claude RPC
 
-Lightweight Discord Rich Presence for Claude Code and Claude Desktop on Windows and macOS.
+Tauri-based Discord Rich Presence for Claude Code and Claude Desktop on Windows and macOS.
 
 ## Features
 
@@ -10,13 +10,13 @@ Lightweight Discord Rich Presence for Claude Code and Claude Desktop on Windows 
 - No bundled Node.js, Python, PyInstaller, or sidecar daemon
 - Discord IPC implemented in Rust
 - Single process app: `Claude RPC`
-- Fast 250 ms detection polling for Desktop model and effort switches
+- 250 ms detection polling for Desktop model and effort switches
 - Claude Code and Claude Desktop process detection on Windows and macOS
 - Claude Desktop mode detection: Chat, Code, Cowork, Dispatch on Windows; Chat, Code, Cowork on macOS
 - Claude Desktop model detection on macOS from Chat/Cowork local storage, Cowork local agent sessions, and Code session fallback
 - Claude Desktop Code effort detection on macOS from `ccd-effort-level`
 - Claude Code model/project/session timestamp from `~/.claude/projects/*.jsonl`, including `/model` command output
-- Resilient model detection: per-session cache plus `~/.claude.json` fallback so the model still shows during long loads or large attachments
+- Model detection uses a per-session cache and `~/.claude.json` fallback during long loads or large attachments
 - Provider detection from Claude settings, env, API key helpers, `~/.claude.json`, or OAuth credential patterns
 - Usage limit display with cached values: 5h, All, Sonnet only, Design
 - Optional visibility toggles for provider, effort, session title, and usage limits
@@ -121,7 +121,7 @@ Example:
 
 Claude usage percentages are only available after Claude exposes them on the Usage page. Use `Refresh` in settings to open the Usage page, then Claude RPC caches the latest valid values.
 
-The v3 refactor intentionally removed the legacy Node/Python runtime path. Runtime is now a single lightweight Tauri executable.
+The v3 refactor removed the legacy Node/Python runtime path. Runtime is now a single Tauri executable.
 
 ## License
 
